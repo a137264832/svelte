@@ -1,5 +1,5 @@
 import {
-	disallowed_parapgraph_contents,
+	disallowed_paragraph_contents,
 	interactive_elements,
 	is_tag_valid_with_parent
 } from '../../../constants.js';
@@ -535,7 +535,7 @@ const validation = {
 			}
 		}
 
-		if (disallowed_parapgraph_contents.includes(node.name)) {
+		if (disallowed_paragraph_contents.includes(node.name)) {
 			const path = context.path;
 			for (let parent of path) {
 				if (parent.type === 'RegularElement' && parent.name === 'p') {
@@ -997,11 +997,29 @@ export const validation_runes = merge(validation, a11y_validators, {
 		if (node.label.name !== '$' || path.at(-1)?.type !== 'Program') return;
 		error(node, 'invalid-legacy-reactive-statement');
 	},
-	ExportNamedDeclaration(node, { state }) {
-		if (node.declaration?.type !== 'VariableDeclaration') return;
-		if (node.declaration.kind !== 'let') return;
-		if (state.analysis.instance.scope !== state.scope) return;
-		error(node, 'invalid-legacy-export');
+	ExportNamedDeclaration(node, { state, next }) {
+		if (state.ast_type === 'module') {
+			if (node.declaration?.type !== 'VariableDeclaration') return;
+
+			// visit children, so bindings are correctly initialised
+			next();
+
+			for (const declarator of node.declaration.declarations) {
+				for (const id of extract_identifiers(declarator.id)) {
+					validate_export(node, state.scope, id.name);
+				}
+			}
+		} else {
+			if (node.declaration?.type !== 'VariableDeclaration') return;
+			if (node.declaration.kind !== 'let') return;
+			if (state.analysis.instance.scope !== state.scope) return;
+			error(node, 'invalid-legacy-export');
+		}
+	},
+	ExportSpecifier(node, { state }) {
+		if (state.ast_type === 'module') {
+			validate_export(node, state.scope, node.local.name);
+		}
 	},
 	CallExpression(node, { state, path }) {
 		validate_call_expression(node, state.scope, path);
