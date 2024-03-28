@@ -93,6 +93,25 @@ This can improve performance with large arrays and objects that you weren't plan
 
 > Objects and arrays passed to `$state.frozen` will be shallowly frozen using `Object.freeze()`. If you don't want this, pass in a clone of the object or array instead.
 
+### Reactive Map, Set and Date
+
+Svelte provides reactive `Map`, `Set` and `Date` classes. These can be imported from `svelte/reactivity` and used just like their native counterparts.
+
+```svelte
+<script>
+	import { Map } from 'svelte/reactivity';
+
+	const map = new Map();
+	map.set('message', 'hello');
+
+	function update_message() {
+		map.set('message', 'goodbye');
+	}
+</script>
+
+<p>{map.get('message')}</p>
+```
+
 ## `$derived`
 
 Derived state is declared with the `$derived` rune:
@@ -239,78 +258,60 @@ An effect only reruns when the object it reads changes, not when a property insi
 <p>{count} doubled is {doubled}</p>
 ```
 
-You can return a function from `$effect`, which will run immediately before the effect re-runs, and before it is destroyed.
+You can return a function from `$effect`, which will run immediately before the effect re-runs, and before it is destroyed ([demo](/#H4sIAAAAAAAAE42SzW6DMBCEX2Vl5RDaVCQ9JoDUY--9lUox9lKsGBvZC1GEePcaKPnpqSe86_m0M2t6ViqNnu0_e2Z4jWzP3pqGbRhdmrHwHWrCUHvbOjF2Ei-caijLTU4aCYRtDUEKK0-ccL2NDstNrbRWHoU10t8Eu-121gTVCssSBa3XEaQZ9GMrpziGj0p5OAccCgSHwmEgJZwrNNihg6MyhK7j-gii4uYb_YyGUZ5guQwzPdL7b_U4ZNSOvp9T2B3m1rB5cLx4zMkhtc7AHz7YVCVwEFzrgosTBMuNs52SKDegaPbvWnMH8AhUXaNUIY6-hHCldQhUIcyLCFlfAuHvkCKaYk8iYevGGgy2wyyJnpy9oLwG0sjdNe2yhGhJN32HsUzi2xOapNpl_bSLIYnDeeoVLZE1YI3QSpzSfo7-8J5PKbwOmdf2jC6JZyD7HxpPaMk93aHhF6utVKVCyfbkWhy-hh9Z3o_2nQIAAA==)).
 
 ```svelte
 <script>
 	let count = $state(0);
-	let doubled = $derived(count * 2);
+	let milliseconds = $state(1000);
 
 	$effect(() => {
-		console.log({ count, doubled });
+		// This will be recreated whenever `milliseconds` changes
+		const interval = setInterval(() => {
+			count += 1;
+		}, milliseconds);
 
 		return () => {
 			// if a callback is provided, it will run
 			// a) immediately before the effect re-runs
 			// b) when the component is destroyed
-			console.log('cleanup');
+			clearInterval(interval);
 		};
 	});
 </script>
 
-<button on:click={() => count++}>
-	{doubled}
-</button>
+<h1>{count}</h1>
 
-<p>{count} doubled is {doubled}</p>
+<button onclick={() => (milliseconds *= 2)}>slower</button>
+<button onclick={() => (milliseconds /= 2)}>faster</button>
 ```
 
-> `$effect` was designed for managing side effects such as logging or connecting to external systems like third party libraries that have an imperative API. If you're managing state or dataflow, you should use it with caution – most of the time, you're better off using a different pattern. Below are some use cases and what to use instead.
+### When not to use `$effect`
 
-If you update `$state` inside an `$effect`, you most likely want to use `$derived` instead.
+In general, `$effect` is best considered something of an escape hatch — useful for things like analytics and direct DOM manipulation — rather than a tool you should use frequently. In particular, avoid using it to synchronise state. Instead of this...
 
 ```svelte
-<!-- Don't do this -->
 <script>
 	let count = $state(0);
 	let doubled = $state();
+
+	// don't do this!
 	$effect(() => {
 		doubled = count * 2;
 	});
 </script>
+```
 
-<!-- Do this instead: -->
+...do this:
+
+```svelte
 <script>
 	let count = $state(0);
 	let doubled = $derived(count * 2);
 </script>
 ```
 
-This also applies to more complex calculations that require more than a simple expression and write to more than one variable. In these cases, you can use `$derived.by`.
-
-```svelte
-<!-- Don't do this -->
-<script>
-	let result_1 = $state();
-	let result_2 = $state();
-	$effect(() => {
-		// ... some lengthy code resulting in
-		result_1 = someValue;
-		result_2 = someOtherValue;
-	});
-</script>
-
-<!-- Do this instead: -->
-<script>
-	let { result_1, result_2 } = $derived.by(() => {
-		// ... some lengthy code resulting in
-		return {
-			result_1: someValue,
-			result_2: someOtherValue
-		};
-	});
-</script>
-```
+> For things that are more complicated than a simple expression like `count * 2`, you can also use [`$derived.by`](#$derived-by).
 
 When reacting to a state change and writing to a different state as a result, think about if it's possible to use callback props instead.
 
@@ -472,21 +473,50 @@ To get all properties, use rest syntax:
 let { a, b, c, ...everythingElse } = $props();
 ```
 
-If you're using TypeScript, you can use type arguments:
+If you're using TypeScript, you can declare the prop types:
 
 ```ts
 type MyProps = any;
 // ---cut---
-let { a, b, c, ...everythingElse } = $props<MyProps>();
+let { a, b, c, ...everythingElse }: MyProps = $props();
 ```
 
-Props cannot be mutated, unless the parent component uses `bind:`. During development, attempts to mutate props will result in an error.
+> In an earlier preview, `$props()` took a type argument. This caused bugs, since in a case like this...
+>
+> ```ts
+> // @errors: 2558
+> let { x = 42 } = $props<{ x: string }>();
+> ```
+>
+> ...TypeScript [widens the type](https://www.typescriptlang.org/play?#code/CYUwxgNghgTiAEAzArgOzAFwJYHtXwBIAHGHIgZwB4AVeAXnilQE8A+ACgEoAueagbgBQgiCAzwA3vAAe9eABYATPAC+c4qQqUp03uQwwsqAOaqOnIfCsB6a-AB6AfiA) of `x` to be `string | number`, instead of erroring.
+
+By default props are treated as readonly, meaning reassignments will not propagate upwards and mutations will result in a warning at runtime in development mode. You will also get a runtime error when trying to `bind:` to a readonly prop in a parent component. To declare props as bindable, use [`$bindable()`](#bindable).
 
 ### What this replaces
 
 `$props` replaces the `export let` and `export { x as y }` syntax for declaring props. It also replaces `$$props` and `$$restProps`, and the little-known `interface $$Props {...}` construct.
 
 Note that you can still use `export const` and `export function` to expose things to users of your component (if they're using `bind:this`, for example).
+
+### `$bindable()`
+
+To declare props as bindable, use `$bindable()`. Besides using them as regular props, the parent can (_can_, not _must_) then also `bind:` to them.
+
+```svelte
+<script>
+	let { bindableProp = $bindable() } = $props();
+</script>
+```
+
+You can pass an argument to `$bindable()`. This argument is used as a fallback value when the property is `undefined`.
+
+```svelte
+<script>
+	let { bindableProp = $bindable('fallback') } = $props();
+</script>
+```
+
+Note that the parent is not allowed to pass `undefined` to a property with a fallback if it `bind:`s to that property.
 
 ## `$inspect`
 

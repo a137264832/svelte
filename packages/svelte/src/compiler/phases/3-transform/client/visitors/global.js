@@ -17,7 +17,6 @@ export const global_visitors = {
 			// rewrite `this.#foo` as `this.#foo.v` inside a constructor
 			if (node.property.type === 'PrivateIdentifier') {
 				const field = state.private_state.get(node.property.name);
-
 				if (field) {
 					return state.in_constructor ? b.member(node, b.id('v')) : b.call('$.get', node);
 				}
@@ -53,6 +52,7 @@ export const global_visitors = {
 				binding?.kind === 'each' ||
 				binding?.kind === 'legacy_reactive' ||
 				binding?.kind === 'prop' ||
+				binding?.kind === 'bindable_prop' ||
 				is_store
 			) {
 				/** @type {import('estree').Expression[]} */
@@ -65,7 +65,7 @@ export const global_visitors = {
 					fn += '_store';
 					args.push(serialize_get_binding(b.id(name), state), b.call('$' + name));
 				} else {
-					if (binding.kind === 'prop') fn += '_prop';
+					if (binding.kind === 'prop' || binding.kind === 'bindable_prop') fn += '_prop';
 					args.push(b.id(name));
 				}
 

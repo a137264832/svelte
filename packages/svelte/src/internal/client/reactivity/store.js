@@ -1,8 +1,8 @@
 import { subscribe_to_store } from '../../../store/utils.js';
 import { noop } from '../../common.js';
 import { UNINITIALIZED } from '../constants.js';
-import { get, set_ignore_mutation_validation, untrack } from '../runtime.js';
-import { user_effect } from './effects.js';
+import { get, untrack } from '../runtime.js';
+import { effect } from './effects.js';
 import { mutable_source, set } from './sources.js';
 
 /**
@@ -27,11 +27,6 @@ export function store_get(store, store_name, stores) {
 			value: mutable_source(UNINITIALIZED),
 			unsubscribe: noop
 		};
-		// TODO: can we remove this code? it was refactored out when we split up source/comptued signals
-		// push_destroy_fn(entry.value, () => {
-		// 	/** @type {import('#client').StoreReferencesContainer['']} */ (entry).last_value =
-		// 		/** @type {import('#client').StoreReferencesContainer['']} */ (entry).value.value;
-		// });
 		stores[store_name] = entry;
 	}
 
@@ -79,13 +74,7 @@ function connect_store_to_signal(store, source) {
 		return noop;
 	}
 
-	/** @param {V} v */
-	const run = (v) => {
-		set_ignore_mutation_validation(true);
-		set(source, v);
-		set_ignore_mutation_validation(false);
-	};
-	return subscribe_to_store(store, run);
+	return subscribe_to_store(store, (v) => set(source, v));
 }
 
 /**
@@ -101,6 +90,17 @@ export function store_set(store, value) {
 }
 
 /**
+ * @param {import('#client').StoreReferencesContainer} stores
+ * @param {string} store_name
+ */
+export function invalidate_store(stores, store_name) {
+	const store = stores[store_name];
+	if (store.store) {
+		store_set(store.store, store.value.v);
+	}
+}
+
+/**
  * Unsubscribes from all auto-subscribed stores on destroy
  * @param {import('#client').StoreReferencesContainer} stores
  */
@@ -110,8 +110,6 @@ export function unsubscribe_on_destroy(stores) {
 		for (store_name in stores) {
 			const ref = stores[store_name];
 			ref.unsubscribe();
-			// TODO: can we remove this code? it was refactored out when we split up source/comptued signals
-			// destroy_signal(ref.value);
 		}
 	});
 }
@@ -126,19 +124,6 @@ export function unsubscribe_on_destroy(stores) {
 export function mutate_store(store, expression, new_value) {
 	store.set(new_value);
 	return expression;
-}
-
-/**
- * @template V
- * @param {unknown} val
- * @returns {val is import('#client').Store<V>}
- */
-export function is_store(val) {
-	return (
-		typeof val === 'object' &&
-		val !== null &&
-		typeof (/** @type {import('#client').Store<V>} */ (val).subscribe) === 'function'
-	);
 }
 
 /**
@@ -170,5 +155,5 @@ export function update_pre_store(store, store_value, d = 1) {
  * @returns {void}
  */
 function on_destroy(fn) {
-	user_effect(() => () => untrack(fn));
+	effect(() => () => untrack(fn));
 }

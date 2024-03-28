@@ -105,7 +105,7 @@ const newComponentEvents2: ComponentEvents<NewComponent> = {
 };
 
 mount(NewComponent, {
-	target: null as any as Document | Element | ShadowRoot | Text | Comment,
+	target: null as any as Document | Element | ShadowRoot,
 	props: {
 		prop: 'foo',
 		// @ts-expect-error
@@ -120,7 +120,7 @@ mount(NewComponent, {
 });
 
 hydrate(NewComponent, {
-	target: null as any as Document | Element | ShadowRoot | Text | Comment,
+	target: null as any as Document | Element | ShadowRoot,
 	props: {
 		prop: 'foo',
 		// @ts-expect-error
@@ -170,5 +170,5 @@ asLegacyComponent.anExport;
 const x: typeof asLegacyComponent = createClassComponent({
 	target: null as any,
 	hydrate: true,
-	component: newComponent
+	component: NewComponent
 });

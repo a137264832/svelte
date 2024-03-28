@@ -1,5 +1,115 @@
 # svelte
 
+## 5.0.0-next.85
+
+### Patch Changes
+
+- feat: use implicit return for each block keys ([#10938](https://github.com/sveltejs/svelte/pull/10938))
+
+- breaking: always run pre effects immediately ([#10928](https://github.com/sveltejs/svelte/pull/10928))
+
+- fix: improve order of pre-effect execution ([#10942](https://github.com/sveltejs/svelte/pull/10942))
+
+- feat: more efficient each block compiler output ([#10937](https://github.com/sveltejs/svelte/pull/10937))
+
+## 5.0.0-next.84
+
+### Patch Changes
+
+- fix: reliably remove undefined attributes during hydration ([#10917](https://github.com/sveltejs/svelte/pull/10917))
+
+- fix: Add `elementtiming` HTMLAttribute, remove `crossorigin` from HTMLInputAttributes ([#10921](https://github.com/sveltejs/svelte/pull/10921))
+
+- feat: shorter compiler output for attribute updates ([#10917](https://github.com/sveltejs/svelte/pull/10917))
+
+## 5.0.0-next.83
+
+### Patch Changes
+
+- feat: more efficient if block compiler output ([#10906](https://github.com/sveltejs/svelte/pull/10906))
+
+- fix: update type of `options.target` ([#10892](https://github.com/sveltejs/svelte/pull/10892))
+
+- fix: correctly hydrate controlled each-else block ([#10887](https://github.com/sveltejs/svelte/pull/10887))
+
+- fix: Add `dirname` to HTMLInputAttributes ([#10908](https://github.com/sveltejs/svelte/pull/10908))
+
+## 5.0.0-next.82
+
+### Patch Changes
+
+- fix: allow runes for variable declarations in the template ([#10879](https://github.com/sveltejs/svelte/pull/10879))
+
+- feat: take form resets into account for two way bindings ([#10617](https://github.com/sveltejs/svelte/pull/10617))
+
+- fix: handle multiple snippet parameters with one or more being optional ([#10833](https://github.com/sveltejs/svelte/pull/10833))
+
+- breaking: apply fallback value every time in runes mode ([#10797](https://github.com/sveltejs/svelte/pull/10797))
+
+## 5.0.0-next.81
+
+### Patch Changes
+
+- feat: add support for webkitdirectory DOM boolean attribute ([#10847](https://github.com/sveltejs/svelte/pull/10847))
+
+- fix: don't override instance methods during legacy class creation ([#10834](https://github.com/sveltejs/svelte/pull/10834))
+
+- fix: adjust scope parent for named slots ([#10843](https://github.com/sveltejs/svelte/pull/10843))
+
+- fix: improve handling of unowned derived signals ([#10842](https://github.com/sveltejs/svelte/pull/10842))
+
+- fix: improve element class attribute behaviour ([#10856](https://github.com/sveltejs/svelte/pull/10856))
+
+- fix: ensure select value is updated upon select option removal ([#10846](https://github.com/sveltejs/svelte/pull/10846))
+
+- fix: ensure capture events don't call delegated events ([#10831](https://github.com/sveltejs/svelte/pull/10831))
+
+## 5.0.0-next.80
+
+### Patch Changes
+
+- fix: add types for svelte/reactivity ([#10817](https://github.com/sveltejs/svelte/pull/10817))
+
+- fix: ensure arguments are supported on all reactive Date methods ([#10813](https://github.com/sveltejs/svelte/pull/10813))
+
+## 5.0.0-next.79
+
+### Patch Changes
+
+- feat: add reactive Map class to svelte/reactivity ([#10803](https://github.com/sveltejs/svelte/pull/10803))
+
+## 5.0.0-next.78
+
+### Patch Changes
+
+- fix: invalidate store when mutated inside each block ([#10785](https://github.com/sveltejs/svelte/pull/10785))
+
+- fix: make `set.has(...)` granular for existing properties' ([#10793](https://github.com/sveltejs/svelte/pull/10793))
+
+## 5.0.0-next.77
+
+### Patch Changes
+
+- fix: adjust render effect ordering ([#10783](https://github.com/sveltejs/svelte/pull/10783))
+
+- fix: handle component binding mutation ([#10786](https://github.com/sveltejs/svelte/pull/10786))
+
+## 5.0.0-next.76
+
+### Patch Changes
+
+- feat: add reactive Set class to svelte/reactivity ([#10781](https://github.com/sveltejs/svelte/pull/10781))
+
+- breaking: make `$props()` rune non-generic ([#10694](https://github.com/sveltejs/svelte/pull/10694))
+
+- fix: improve internal render effect sequencing ([#10769](https://github.com/sveltejs/svelte/pull/10769))
+
+## 5.0.0-next.75
+
+### Patch Changes
+
+- fix: use getters for derived class state fields, with memoisation ([#10757](https://github.com/sveltejs/svelte/pull/10757))
+
 ## 5.0.0-next.74
 
 ### Patch Changes

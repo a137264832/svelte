@@ -1,69 +1,89 @@
 import { DEV } from 'esm-env';
 import {
-	current_block,
+	check_dirtiness,
 	current_component_context,
 	current_effect,
-	destroy_signal,
-	flush_local_render_effects,
+	current_reaction,
+	destroy_children,
+	execute_effect,
 	get,
-	is_runes,
+	is_flushing_effect,
+	remove_reactions,
 	schedule_effect,
+	set_is_flushing_effect,
+	set_signal_status,
 	untrack
 } from '../runtime.js';
-import { DIRTY, MANAGED, RENDER_EFFECT, EFFECT, PRE_EFFECT } from '../constants.js';
+import {
+	DIRTY,
+	BRANCH_EFFECT,
+	RENDER_EFFECT,
+	EFFECT,
+	PRE_EFFECT,
+	DESTROYED,
+	INERT,
+	IS_ELSEIF,
+	EFFECT_RAN,
+	BLOCK_EFFECT,
+	ROOT_EFFECT
+} from '../constants.js';
 import { set } from './sources.js';
-
-/**
- * @param {import('#client').Reaction} target_signal
- * @param {import('#client').Reaction} ref_signal
- * @returns {void}
- */
-export function push_reference(target_signal, ref_signal) {
-	const references = target_signal.r;
-	if (references === null) {
-		target_signal.r = [ref_signal];
-	} else {
-		references.push(ref_signal);
-	}
-}
+import { noop } from '../../common.js';
+import { remove } from '../dom/reconciler.js';
 
 /**
  * @param {import('./types.js').EffectType} type
- * @param {(() => void | (() => void)) | ((b: import('#client').Block) => void | (() => void))} fn
+ * @param {(() => void | (() => void))} fn
  * @param {boolean} sync
- * @param {null | import('#client').Block} block
- * @param {boolean} schedule
+ * @param {boolean} init
  * @returns {import('#client').Effect}
  */
-function create_effect(type, fn, sync, block, schedule) {
+function create_effect(type, fn, sync, init = true) {
+	var is_root = (type & ROOT_EFFECT) !== 0;
 	/** @type {import('#client').Effect} */
-	const signal = {
-		b: block,
-		c: null,
-		d: null,
-		e: null,
+	var effect = {
+		parent: is_root ? null : current_effect,
+		dom: null,
+		deps: null,
 		f: type | DIRTY,
 		l: 0,
-		i: fn,
-		r: null,
-		v: null,
-		w: 0,
-		x: current_component_context,
-		y: null
+		fn,
+		effects: null,
+		deriveds: null,
+		teardown: null,
+		ctx: current_component_context,
+		transitions: null
 	};
 
 	if (current_effect !== null) {
-		signal.l = current_effect.l + 1;
-		if ((type & MANAGED) === 0) {
-			push_reference(current_effect, signal);
+		effect.l = current_effect.l + 1;
+	}
+
+	if (current_reaction !== null && !is_root) {
+		if (current_reaction.effects === null) {
+			current_reaction.effects = [effect];
+		} else {
+			current_reaction.effects.push(effect);
 		}
 	}
 
-	if (schedule) {
-		schedule_effect(signal, sync);
+	if (init) {
+		if (sync) {
+			var previously_flushing_effect = is_flushing_effect;
+
+			try {
+				set_is_flushing_effect(true);
+				execute_effect(effect);
+				effect.f |= EFFECT_RAN;
+			} finally {
+				set_is_flushing_effect(previously_flushing_effect);
+			}
+		} else {
+			schedule_effect(effect);
+		}
 	}
 
-	return signal;
+	return effect;
 }
 
 /**
@@ -71,7 +91,7 @@ function create_effect(type, fn, sync, block, schedule) {
  * @returns {boolean}
  */
 export function effect_active() {
-	return current_effect ? (current_effect.f & MANAGED) === 0 : false;
+	return current_effect ? (current_effect.f & (BRANCH_EFFECT | ROOT_EFFECT)) === 0 : false;
 }
 
 /**
@@ -87,20 +107,17 @@ export function user_effect(fn) {
 		);
 	}
 
-	const apply_component_effect_heuristics =
+	// Non-nested `$effect(...)` in a component should be deferred
+	// until the component is mounted
+	const defer =
 		current_effect.f & RENDER_EFFECT &&
+		// TODO do we actually need this? removing them changes nothing
 		current_component_context !== null &&
 		!current_component_context.m;
 
-	const effect = create_effect(
-		EFFECT,
-		fn,
-		false,
-		current_block,
-		!apply_component_effect_heuristics
-	);
+	const effect = create_effect(EFFECT, fn, false, !defer);
 
-	if (apply_component_effect_heuristics) {
+	if (defer) {
 		const context = /** @type {import('#client').ComponentContext} */ (current_component_context);
 		(context.e ??= []).push(effect);
 	}
@@ -109,48 +126,11 @@ export function user_effect(fn) {
 }
 
 /**
- * Internal representation of `$effect.root(...)`
- * @param {() => void | (() => void)} fn
- * @returns {() => void}
- */
-export function user_root_effect(fn) {
-	const effect = render_effect(fn, current_block, true);
-	return () => {
-		destroy_signal(effect);
-	};
-}
-
-/**
- * @param {() => void | (() => void)} fn
- * @returns {import('#client').Effect}
- */
-export function effect(fn) {
-	return create_effect(EFFECT, fn, false, current_block, true);
-}
-
-/**
- * @param {() => void | (() => void)} fn
- * @returns {import('#client').Effect}
- */
-export function managed_effect(fn) {
-	return create_effect(EFFECT | MANAGED, fn, false, current_block, true);
-}
-
-/**
- * @param {() => void | (() => void)} fn
- * @param {boolean} sync
- * @returns {import('#client').Effect}
- */
-export function managed_pre_effect(fn, sync) {
-	return create_effect(PRE_EFFECT | MANAGED, fn, sync, current_block, true);
-}
-
-/**
  * Internal representation of `$effect.pre(...)`
  * @param {() => void | (() => void)} fn
  * @returns {import('#client').Effect}
  */
-export function pre_effect(fn) {
+export function user_pre_effect(fn) {
 	if (current_effect === null) {
 		throw new Error(
 			'ERR_SVELTE_ORPHAN_EFFECT' +
@@ -159,19 +139,28 @@ export function pre_effect(fn) {
 					: '')
 		);
 	}
-	const sync = current_effect !== null && (current_effect.f & RENDER_EFFECT) !== 0;
-	const runes = is_runes(current_component_context);
-	return create_effect(
-		PRE_EFFECT,
-		() => {
-			const val = fn();
-			flush_local_render_effects();
-			return val;
-		},
-		sync,
-		current_block,
-		true
-	);
+
+	return pre_effect(fn);
+}
+
+/**
+ * Internal representation of `$effect.root(...)`
+ * @param {() => void | (() => void)} fn
+ * @returns {() => void}
+ */
+export function effect_root(fn) {
+	const effect = create_effect(ROOT_EFFECT, () => untrack(fn), true);
+	return () => {
+		destroy_effect(effect);
+	};
+}
+
+/**
+ * @param {() => void | (() => void)} fn
+ * @returns {import('#client').Effect}
+ */
+export function effect(fn) {
+	return create_effect(EFFECT, fn, false);
 }
 
 /**
@@ -185,21 +174,15 @@ export function legacy_pre_effect(deps, fn) {
 		current_component_context
 	);
 	const token = {};
-	return create_effect(
-		PRE_EFFECT,
-		() => {
-			deps();
-			if (component_context.l1.includes(token)) {
-				return;
-			}
-			component_context.l1.push(token);
-			set(component_context.l2, true);
-			return untrack(fn);
-		},
-		true,
-		current_block,
-		true
-	);
+	return pre_effect(() => {
+		deps();
+		if (component_context.l1.includes(token)) {
+			return;
+		}
+		component_context.l1.push(token);
+		set(component_context.l2, true);
+		return untrack(fn);
+	});
 }
 
 export function legacy_pre_effect_reset() {
@@ -216,28 +199,181 @@ export function legacy_pre_effect_reset() {
 }
 
 /**
- * This effect is used to ensure binding are kept in sync. We use a pre effect to ensure we run before the
- * bindings which are in later effects. However, we don't use a pre_effect directly as we don't want to flush anything.
- *
  * @param {() => void | (() => void)} fn
  * @returns {import('#client').Effect}
  */
-export function invalidate_effect(fn) {
-	return create_effect(PRE_EFFECT, fn, true, current_block, true);
+export function pre_effect(fn) {
+	return create_effect(PRE_EFFECT, fn, true);
 }
 
 /**
- * @template {import('#client').Block} B
- * @param {(block: B) => void | (() => void)} fn
- * @param {any} block
- * @param {any} managed
- * @param {any} sync
+ * @param {(() => void)} fn
  * @returns {import('#client').Effect}
  */
-export function render_effect(fn, block = current_block, managed = false, sync = true) {
-	let flags = RENDER_EFFECT;
-	if (managed) {
-		flags |= MANAGED;
+export function render_effect(fn) {
+	return create_effect(RENDER_EFFECT, fn, true);
+}
+
+/** @param {(() => void)} fn */
+export function block(fn) {
+	return create_effect(RENDER_EFFECT | BLOCK_EFFECT, fn, true);
+}
+
+/** @param {(() => void)} fn */
+export function branch(fn) {
+	return create_effect(RENDER_EFFECT | BRANCH_EFFECT, fn, true);
+}
+
+/**
+ * @param {import('#client').Effect} effect
+ * @returns {void}
+ */
+export function destroy_effect(effect) {
+	destroy_children(effect);
+	remove_reactions(effect, 0);
+	set_signal_status(effect, DESTROYED);
+
+	if (effect.transitions) {
+		for (const transition of effect.transitions) {
+			transition.stop();
+		}
 	}
-	return create_effect(flags, /** @type {any} */ (fn), sync, block, true);
+
+	effect.teardown?.();
+
+	if (effect.dom !== null) {
+		remove(effect.dom);
+	}
+
+	effect.effects =
+		effect.teardown =
+		effect.ctx =
+		effect.dom =
+		effect.deps =
+		// @ts-expect-error
+		effect.fn =
+			null;
+}
+
+/**
+ * When a block effect is removed, we don't immediately destroy it or yank it
+ * out of the DOM, because it might have transitions. Instead, we 'pause' it.
+ * It stays around (in memory, and in the DOM) until outro transitions have
+ * completed, and if the state change is reversed then we _resume_ it.
+ * A paused effect does not update, and the DOM subtree becomes inert.
+ * @param {import('#client').Effect} effect
+ * @param {() => void} callback
+ */
+export function pause_effect(effect, callback = noop) {
+	/** @type {import('#client').TransitionManager[]} */
+	var transitions = [];
+
+	pause_children(effect, transitions, true);
+
+	out(transitions, () => {
+		destroy_effect(effect);
+		callback();
+	});
+}
+
+/**
+ * Pause multiple effects simultaneously, and coordinate their
+ * subsequent destruction. Used in each blocks
+ * @param {import('#client').Effect[]} effects
+ * @param {() => void} callback
+ */
+export function pause_effects(effects, callback = noop) {
+	/** @type {import('#client').TransitionManager[]} */
+	var transitions = [];
+
+	for (var effect of effects) {
+		pause_children(effect, transitions, true);
+	}
+
+	out(transitions, () => {
+		for (var effect of effects) {
+			destroy_effect(effect);
+		}
+		callback();
+	});
+}
+
+/**
+ * @param {import('#client').TransitionManager[]} transitions
+ * @param {() => void} fn
+ */
+function out(transitions, fn) {
+	var remaining = transitions.length;
+	if (remaining > 0) {
+		var check = () => --remaining || fn();
+		for (var transition of transitions) {
+			transition.out(check);
+		}
+	} else {
+		fn();
+	}
+}
+
+/**
+ * @param {import('#client').Effect} effect
+ * @param {import('#client').TransitionManager[]} transitions
+ * @param {boolean} local
+ */
+function pause_children(effect, transitions, local) {
+	if ((effect.f & INERT) !== 0) return;
+	effect.f ^= INERT;
+
+	if (effect.transitions !== null) {
+		for (const transition of effect.transitions) {
+			if (transition.is_global || local) {
+				transitions.push(transition);
+			}
+		}
+	}
+
+	if (effect.effects !== null) {
+		for (const child of effect.effects) {
+			var transparent = (child.f & IS_ELSEIF) !== 0 || (child.f & BRANCH_EFFECT) !== 0;
+			pause_children(child, transitions, transparent ? local : false);
+		}
+	}
+}
+
+/**
+ * The opposite of `pause_effect`. We call this if (for example)
+ * `x` becomes falsy then truthy: `{#if x}...{/if}`
+ * @param {import('#client').Effect} effect
+ */
+export function resume_effect(effect) {
+	resume_children(effect, true);
+}
+
+/**
+ * @param {import('#client').Effect} effect
+ * @param {boolean} local
+ */
+function resume_children(effect, local) {
+	if ((effect.f & INERT) === 0) return;
+	effect.f ^= INERT;
+
+	// If a dependency of this effect changed while it was paused,
+	// apply the change now
+	if (check_dirtiness(effect)) {
+		execute_effect(effect);
+	}
+
+	if (effect.effects !== null) {
+		for (const child of effect.effects) {
+			var transparent = (child.f & IS_ELSEIF) !== 0 || (child.f & BRANCH_EFFECT) !== 0;
+			resume_children(child, transparent ? local : false);
+		}
+	}
+
+	if (effect.transitions !== null) {
+		for (const transition of effect.transitions) {
+			if (transition.is_global || local) {
+				transition.in();
+			}
+		}
+	}
 }

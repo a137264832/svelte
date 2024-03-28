@@ -1,11 +1,5 @@
 import { DEV } from 'esm-env';
-import {
-	get,
-	updating_derived,
-	batch_inspect,
-	current_component_context,
-	untrack
-} from './runtime.js';
+import { get, batch_inspect, current_component_context, untrack } from './runtime.js';
 import { effect_active } from './reactivity/effects.js';
 import {
 	array_prototype,
@@ -20,6 +14,7 @@ import {
 import { add_owner, check_ownership, strip_owner } from './dev/ownership.js';
 import { mutable_source, source, set } from './reactivity/sources.js';
 import { STATE_SYMBOL, UNINITIALIZED } from './constants.js';
+import { updating_derived } from './reactivity/deriveds.js';
 
 /**
  * @template T
@@ -53,7 +48,6 @@ export function proxy(value, immutable = true, owners) {
 
 		const prototype = get_prototype_of(value);
 
-		// TODO handle Map and Set as well
 		if (prototype === object_prototype || prototype === array_prototype) {
 			const proxy = new Proxy(value, state_proxy_handler);
 
@@ -152,8 +146,7 @@ export function unstate(value) {
  * @param {1 | -1} [d]
  */
 function update_version(signal, d = 1) {
-	const value = untrack(() => get(signal));
-	set(signal, value + d);
+	set(signal, signal.v + d);
 }
 
 /** @type {ProxyHandler<import('./types.js').ProxyStateObject<any>>} */
