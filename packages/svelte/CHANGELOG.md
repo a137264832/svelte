@@ -1,5 +1,39 @@
 # svelte
 
+## 5.0.0-next.89
+
+### Patch Changes
+
+- fix: expose 'svelte/internal' to prevent Vite erroring on startup ([#10987](https://github.com/sveltejs/svelte/pull/10987))
+
+- fix: revert SSR shorthand comments ([#10980](https://github.com/sveltejs/svelte/pull/10980))
+
+- fix: child effects are removed from parent branches ([#10985](https://github.com/sveltejs/svelte/pull/10985))
+
+## 5.0.0-next.88
+
+### Patch Changes
+
+- fix: further improvements to effect scheduling and flushing ([#10971](https://github.com/sveltejs/svelte/pull/10971))
+
+- feat: re-export built-ins from `svelte/reactivity` on the server ([#10973](https://github.com/sveltejs/svelte/pull/10973))
+
+## 5.0.0-next.87
+
+### Patch Changes
+
+- fix: apply animate on prefix/suffix each block mutations ([#10965](https://github.com/sveltejs/svelte/pull/10965))
+
+## 5.0.0-next.86
+
+### Patch Changes
+
+- fix: improved effect sequencing and execution order ([#10949](https://github.com/sveltejs/svelte/pull/10949))
+
+- breaking: onDestroy functions run child-first ([#10949](https://github.com/sveltejs/svelte/pull/10949))
+
+- fix: improve action support for nested $effect ([#10962](https://github.com/sveltejs/svelte/pull/10962))
+
 ## 5.0.0-next.85
 
 ### Patch Changes
