@@ -168,6 +168,27 @@ export const javascript_visitors_runes = {
 			body.push(/** @type {import('estree').MethodDefinition} **/ (visit(definition, child_state)));
 		}
 
+		if (state.options.dev && public_state.size > 0) {
+			// add an `[$.ADD_OWNER]` method so that a class with state fields can widen ownership
+			body.push(
+				b.method(
+					'method',
+					b.id('$.ADD_OWNER'),
+					[b.id('owner')],
+					Array.from(public_state.keys()).map((name) =>
+						b.stmt(
+							b.call(
+								'$.add_owner',
+								b.call('$.get', b.member(b.this, b.private_id(name))),
+								b.id('owner')
+							)
+						)
+					),
+					true
+				)
+			);
+		}
+
 		return { ...node, body };
 	},
 	VariableDeclaration(node, { state, visit }) {
@@ -176,7 +197,13 @@ export const javascript_visitors_runes = {
 		for (const declarator of node.declarations) {
 			const init = declarator.init;
 			const rune = get_rune(init, state.scope);
-			if (!rune || rune === '$effect.active' || rune === '$effect.root' || rune === '$inspect') {
+			if (
+				!rune ||
+				rune === '$effect.active' ||
+				rune === '$effect.root' ||
+				rune === '$inspect' ||
+				rune === '$state.snapshot'
+			) {
 				if (init != null && is_hoistable_function(init)) {
 					const hoistable_function = visit(init);
 					state.hoisted.push(
@@ -301,7 +328,7 @@ export const javascript_visitors_runes = {
 					declarations.push(
 						b.declarator(
 							b.id(object_id),
-							b.call('$.derived', b.thunk(rune === '$derived.by' ? b.call(value) : value))
+							b.call('$.derived', rune === '$derived.by' ? value : b.thunk(value))
 						)
 					);
 					declarations.push(
@@ -381,8 +408,19 @@ export const javascript_visitors_runes = {
 	CallExpression(node, context) {
 		const rune = get_rune(node, context.state.scope);
 
+		if (rune === '$host') {
+			return b.id('$$props.$$host');
+		}
+
 		if (rune === '$effect.active') {
 			return b.call('$.effect_active');
+		}
+
+		if (rune === '$state.snapshot') {
+			return b.call(
+				'$.snapshot',
+				/** @type {import('estree').Expression} */ (context.visit(node.arguments[0]))
+			);
 		}
 
 		if (rune === '$effect.root') {

@@ -1,6 +1,7 @@
 import is_reference from 'is-reference';
 import { walk } from 'zimmerframe';
-import { error } from '../../errors.js';
+import * as e from '../../errors.js';
+import * as w from '../../warnings.js';
 import {
 	extract_identifiers,
 	extract_all_identifiers_from_expression,
@@ -14,7 +15,6 @@ import { ReservedKeywords, Runes, SVGElements } from '../constants.js';
 import { Scope, ScopeRoot, create_scopes, get_rune, set_scope } from '../scope.js';
 import { merge } from '../visitors.js';
 import { validation_legacy, validation_runes, validation_runes_js } from './validation.js';
-import { warn } from '../../warnings.js';
 import check_graph_for_cycles from './utils/check_graph_for_cycles.js';
 import { regex_starts_with_newline } from '../patterns.js';
 import { create_attribute, is_element_node } from '../nodes.js';
@@ -23,6 +23,8 @@ import { should_proxy_or_freeze } from '../3-transform/client/utils.js';
 import { analyze_css } from './css/css-analyze.js';
 import { prune } from './css/css-prune.js';
 import { hash } from './utils.js';
+import { warn_unused } from './css/css-warn.js';
+import { extract_svelte_ignore } from '../../utils/extract_svelte_ignore.js';
 
 /**
  * @param {import('#compiler').Script | null} script
@@ -228,20 +230,13 @@ export function analyze_module(ast, options) {
 	for (const [name, references] of scope.references) {
 		if (name[0] !== '$' || ReservedKeywords.includes(name)) continue;
 		if (name === '$' || name[1] === '$') {
-			error(references[0].node, 'illegal-global', name);
+			e.illegal_global(references[0].node, name);
 		}
 	}
 
-	/** @type {import('../types').RawWarning[]} */
-	const warnings = [];
-
-	const analysis = {
-		warnings
-	};
-
 	walk(
 		/** @type {import('estree').Node} */ (ast),
-		{ scope, analysis },
+		{ scope, analysis: { runes: true } },
 		// @ts-expect-error TODO clean this mess up
 		merge(set_scope(scopes), validation_runes_js, runes_scope_js_tweaker)
 	);
@@ -249,7 +244,6 @@ export function analyze_module(ast, options) {
 	return {
 		module: { ast, scope, scopes },
 		name: options.filename || 'module',
-		warnings,
 		accessors: false,
 		runes: true,
 		immutable: true
@@ -258,10 +252,11 @@ export function analyze_module(ast, options) {
 
 /**
  * @param {import('#compiler').Root} root
+ * @param {string} source
  * @param {import('#compiler').ValidatedCompileOptions} options
  * @returns {import('../types.js').ComponentAnalysis}
  */
-export function analyze_component(root, options) {
+export function analyze_component(root, source, options) {
 	const scope_root = new ScopeRoot();
 
 	const module = js(root.module, scope_root, false, null);
@@ -272,14 +267,11 @@ export function analyze_component(root, options) {
 	/** @type {import('../types.js').Template} */
 	const template = { ast: root.fragment, scope, scopes };
 
-	/** @type {import('../types').RawWarning[]} */
-	const warnings = [];
-
 	// create synthetic bindings for store subscriptions
 	for (const [name, references] of module.scope.references) {
 		if (name[0] !== '$' || ReservedKeywords.includes(name)) continue;
 		if (name === '$' || name[1] === '$') {
-			error(references[0].node, 'illegal-global', name);
+			e.illegal_global(references[0].node, name);
 		}
 
 		const store_name = name.slice(1);
@@ -300,8 +292,8 @@ export function analyze_component(root, options) {
 					declaration.initial.source.value === 'svelte/store'
 				))
 		) {
-			let is_nested_store_subscription = false;
-			for (const reference of references) {
+			let is_nested_store_subscription_node = undefined;
+			search: for (const reference of references) {
 				for (let i = reference.path.length - 1; i >= 0; i--) {
 					const scope =
 						scopes.get(reference.path[i]) ||
@@ -309,23 +301,26 @@ export function analyze_component(root, options) {
 						instance.scopes.get(reference.path[i]);
 					if (scope) {
 						const owner = scope?.owner(store_name);
-						is_nested_store_subscription =
-							!!owner && owner !== module.scope && owner !== instance.scope;
+						if (!!owner && owner !== module.scope && owner !== instance.scope) {
+							is_nested_store_subscription_node = reference.node;
+							break search;
+						}
 						break;
 					}
 				}
 			}
-			if (is_nested_store_subscription) {
-				error(references[0].node, 'illegal-store-subscription');
+
+			if (is_nested_store_subscription_node) {
+				e.illegal_store_subscription(is_nested_store_subscription_node);
 			}
 
 			if (options.runes !== false) {
 				if (declaration === null && /[a-z]/.test(store_name[0])) {
-					error(references[0].node, 'illegal-global', name);
+					e.illegal_global(references[0].node, name);
 				} else if (declaration !== null && Runes.includes(/** @type {any} */ (name))) {
 					for (const { node, path } of references) {
 						if (path.at(-1)?.type === 'CallExpression') {
-							warn(warnings, node, [], 'store-with-rune-name', store_name);
+							w.store_with_rune_name(node, store_name);
 						}
 					}
 				}
@@ -340,7 +335,7 @@ export function analyze_component(root, options) {
 						// const state = $state(0) is valid
 						get_rune(/** @type {import('estree').Node} */ (path.at(-1)), module.scope) === null
 					) {
-						error(node, 'illegal-subscription');
+						e.illegal_subscription(node);
 					}
 				}
 			}
@@ -374,6 +369,7 @@ export function analyze_component(root, options) {
 		uses_rest_props: false,
 		uses_slots: false,
 		uses_component_bindings: false,
+		uses_render_tags: false,
 		custom_element: options.customElementOptions ?? options.customElement,
 		inject_styles: options.css === 'injected' || options.customElement,
 		accessors: options.customElement
@@ -383,8 +379,7 @@ export function analyze_component(root, options) {
 				!!options.legacy?.componentApi,
 		reactive_statements: new Map(),
 		binding_groups: new Map(),
-		slot_names: new Set(),
-		warnings,
+		slot_names: new Map(),
 		css: {
 			ast: root.css,
 			hash: root.css
@@ -396,22 +391,23 @@ export function analyze_component(root, options) {
 					})
 				: '',
 			keyframes: []
-		}
+		},
+		source
 	};
 
 	if (!options.customElement && root.options?.customElement) {
-		warn(analysis.warnings, root.options, [], 'missing-custom-element-compile-option');
+		w.options_missing_custom_element(root.options);
 	}
 
 	if (analysis.runes) {
 		const props_refs = module.scope.references.get('$$props');
 		if (props_refs) {
-			error(props_refs[0].node, 'invalid-legacy-props');
+			e.invalid_legacy_props(props_refs[0].node);
 		}
 
 		const rest_props_refs = module.scope.references.get('$$restProps');
 		if (rest_props_refs) {
-			error(rest_props_refs[0].node, 'invalid-legacy-rest-props');
+			e.invalid_legacy_rest_props(rest_props_refs[0].node);
 		}
 
 		for (const { ast, scope, scopes } of [module, instance, template]) {
@@ -426,7 +422,8 @@ export function analyze_component(root, options) {
 				component_slots: new Set(),
 				expression: null,
 				private_derived_state: [],
-				function_depth: scope.function_depth
+				function_depth: scope.function_depth,
+				ignores: new Set()
 			};
 
 			walk(
@@ -434,6 +431,20 @@ export function analyze_component(root, options) {
 				state,
 				merge(set_scope(scopes), validation_runes, runes_scope_tweaker, common_visitors)
 			);
+		}
+
+		if (analysis.exports.length > 0) {
+			for (const [_, binding] of instance.scope.declarations) {
+				if (binding.kind === 'prop' || binding.kind === 'bindable_prop') {
+					if (
+						analysis.exports.some(
+							({ alias, name }) => (binding.prop_alias ?? binding.node.name) === (alias ?? name)
+						)
+					) {
+						e.conflicting_property_name(binding.node);
+					}
+				}
+			}
 		}
 	} else {
 		instance.scope.declare(b.id('$$props'), 'bindable_prop', 'synthetic');
@@ -454,7 +465,8 @@ export function analyze_component(root, options) {
 				component_slots: new Set(),
 				expression: null,
 				private_derived_state: [],
-				function_depth: scope.function_depth
+				function_depth: scope.function_depth,
+				ignores: new Set()
 			};
 
 			walk(
@@ -474,12 +486,16 @@ export function analyze_component(root, options) {
 					(r) => r.node !== binding.node && r.path.at(-1)?.type !== 'ExportSpecifier'
 				);
 				if (!references.length && !instance.scope.declarations.has(`$${name}`)) {
-					warn(warnings, binding.node, [], 'unused-export-let', name);
+					w.unused_export_let(binding.node, name);
 				}
 			}
 		}
 
 		analysis.reactive_statements = order_reactive_statements(analysis.reactive_statements);
+	}
+
+	if (analysis.uses_render_tags && (analysis.uses_slots || analysis.slot_names.size > 0)) {
+		e.conflicting_slot_usage(analysis.slot_names.values().next().value);
 	}
 
 	// warn on any nonstate declarations that are a) reassigned and b) referenced in the template
@@ -510,7 +526,7 @@ export function analyze_component(root, options) {
 									type === 'AwaitBlock' ||
 									type === 'KeyBlock'
 								) {
-									warn(warnings, binding.node, [], 'non-state-reference', name);
+									w.non_state_reference(binding.node, name);
 									continue outer;
 								}
 							}
@@ -518,7 +534,7 @@ export function analyze_component(root, options) {
 						}
 					}
 
-					warn(warnings, binding.node, [], 'non-state-reference', name);
+					w.non_state_reference(binding.node, name);
 					continue outer;
 				}
 			}
@@ -531,6 +547,13 @@ export function analyze_component(root, options) {
 		// mark nodes as scoped/unused/empty etc
 		for (const element of analysis.elements) {
 			prune(analysis.css.ast, element);
+		}
+
+		if (
+			!analysis.css.ast.content.comment ||
+			!extract_svelte_ignore(analysis.css.ast.content.comment.data).includes('css_unused_selector')
+		) {
+			warn_unused(analysis.css.ast);
 		}
 
 		outer: for (const element of analysis.elements) {
@@ -653,7 +676,7 @@ const legacy_scope_tweaker = {
 				(d) => d.scope === state.analysis.module.scope && d.declaration_kind !== 'const'
 			)
 		) {
-			warn(state.analysis.warnings, node, path, 'module-script-reactive-declaration');
+			w.module_script_reactive_declaration(node);
 		}
 
 		if (
@@ -839,7 +862,7 @@ const legacy_scope_tweaker = {
 	}
 };
 
-/** @type {import('zimmerframe').Visitors<import('#compiler').SvelteNode, { scope: Scope, analysis: { warnings: import('../types').RawWarning[] } }>} */
+/** @type {import('zimmerframe').Visitors<import('#compiler').SvelteNode, { scope: Scope, analysis: { runes: true } }>} */
 const runes_scope_js_tweaker = {
 	VariableDeclarator(node, { state }) {
 		if (node.init?.type !== 'CallExpression') return;
@@ -1019,6 +1042,65 @@ const function_visitor = (node, context) => {
 
 /** @type {import('./types').Visitors} */
 const common_visitors = {
+	_(node, context) {
+		// @ts-expect-error
+		const comments = /** @type {import('estree').Comment[]} */ (node.leadingComments);
+
+		if (comments) {
+			/** @type {string[]} */
+			const ignores = [];
+
+			for (const comment of comments) {
+				ignores.push(...extract_svelte_ignore(comment.value));
+			}
+
+			if (ignores.length > 0) {
+				// @ts-expect-error see below
+				node.ignores = new Set([...context.state.ignores, ...ignores]);
+			}
+		}
+
+		// @ts-expect-error
+		if (node.ignores) {
+			context.next({
+				...context.state,
+				// @ts-expect-error see below
+				ignores: node.ignores
+			});
+		} else if (context.state.ignores.size > 0) {
+			// @ts-expect-error
+			node.ignores = context.state.ignores;
+		}
+	},
+	Fragment(node, context) {
+		/** @type {string[]} */
+		let ignores = [];
+
+		for (const child of node.nodes) {
+			if (child.type === 'Text' && child.data.trim() === '') {
+				continue;
+			}
+
+			if (child.type === 'Comment') {
+				ignores.push(...extract_svelte_ignore(child.data));
+			} else {
+				const combined_ignores = new Set(context.state.ignores);
+				for (const ignore of ignores) combined_ignores.add(ignore);
+
+				if (combined_ignores.size > 0) {
+					// TODO this is a grotesque hack that's made necessary by the fact that
+					// we can't call `context.visit(...)` here, because we do the convoluted
+					// visitor merging thing. I'm increasingly of the view that we should
+					// rearchitect this stuff and have a single visitor per node. It'd be
+					// more efficient and much simpler.
+					// @ts-expect-error
+					child.ignores = combined_ignores;
+				}
+
+				ignores = [];
+			}
+		}
+	},
 	Attribute(node, context) {
 		if (node.value === true) return;
 
@@ -1066,7 +1148,7 @@ const common_visitors = {
 				break;
 			}
 		}
-		context.state.analysis.slot_names.add(name);
+		context.state.analysis.slot_names.set(name, node);
 	},
 	StyleDirective(node, context) {
 		if (node.value === true) {
@@ -1116,7 +1198,7 @@ const common_visitors = {
 					binding.kind === 'derived') &&
 				context.state.function_depth === binding.scope.function_depth
 			) {
-				warn(context.state.analysis.warnings, node, context.path, 'static-state-reference');
+				w.static_state_reference(node);
 			}
 		}
 	},
@@ -1315,7 +1397,8 @@ const common_visitors = {
 				ancestor.type === 'SvelteFragment' ||
 				ancestor.type === 'SnippetBlock'
 			) {
-				// Inside a slot or a snippet -> this resets the namespace, so we can't determine it
+				// Inside a slot or a snippet -> this resets the namespace, so assume the component namespace
+				node.metadata.svg = context.state.options.namespace === 'svg';
 				return;
 			}
 			if (ancestor.type === 'SvelteElement' || ancestor.type === 'RegularElement') {
@@ -1398,7 +1481,7 @@ function order_reactive_statements(unsorted_reactive_declarations) {
 	const cycle = check_graph_for_cycles(edges);
 	if (cycle?.length) {
 		const declaration = /** @type {Tuple[]} */ (lookup.get(cycle[0]))[0];
-		error(declaration[0], 'cyclical-reactive-declaration', cycle);
+		e.cyclical_reactive_declaration(declaration[0], cycle.join(' → '));
 	}
 
 	// We use a map and take advantage of the fact that the spec says insertion order is preserved when iterating

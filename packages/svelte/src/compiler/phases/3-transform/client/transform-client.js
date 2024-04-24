@@ -1,5 +1,4 @@
 import { walk } from 'zimmerframe';
-import { error } from '../../../errors.js';
 import * as b from '../../../utils/builders.js';
 import { set_scope } from '../../scope.js';
 import { template_visitors } from './visitors/template.js';
@@ -7,7 +6,7 @@ import { global_visitors } from './visitors/global.js';
 import { javascript_visitors } from './visitors/javascript.js';
 import { javascript_visitors_runes } from './visitors/javascript-runes.js';
 import { javascript_visitors_legacy } from './visitors/javascript-legacy.js';
-import { is_state_source, serialize_get_binding } from './utils.js';
+import { serialize_get_binding } from './utils.js';
 import { render_stylesheet } from '../css/index.js';
 
 /**
@@ -52,35 +51,41 @@ export function client_component(source, analysis, options) {
 		get before_init() {
 			/** @type {any[]} */
 			const a = [];
-			a.push = () =>
-				error(null, 'INTERNAL', 'before_init.push should not be called outside create_block');
+			a.push = () => {
+				throw new Error('before_init.push should not be called outside create_block');
+			};
 			return a;
 		},
 		get init() {
 			/** @type {any[]} */
 			const a = [];
-			a.push = () => error(null, 'INTERNAL', 'init.push should not be called outside create_block');
+			a.push = () => {
+				throw new Error('init.push should not be called outside create_block');
+			};
 			return a;
 		},
 		get update() {
 			/** @type {any[]} */
 			const a = [];
-			a.push = () =>
-				error(null, 'INTERNAL', 'update.push should not be called outside create_block');
+			a.push = () => {
+				throw new Error('update.push should not be called outside create_block');
+			};
 			return a;
 		},
 		get after_update() {
 			/** @type {any[]} */
 			const a = [];
-			a.push = () =>
-				error(null, 'INTERNAL', 'after_update.push should not be called outside create_block');
+			a.push = () => {
+				throw new Error('after_update.push should not be called outside create_block');
+			};
 			return a;
 		},
 		get template() {
 			/** @type {any[]} */
 			const a = [];
-			a.push = () =>
-				error(null, 'INTERNAL', 'template.push should not be called outside create_block');
+			a.push = () => {
+				throw new Error('template.push should not be called outside create_block');
+			};
 			return a;
 		},
 		legacy_reactive_statements: new Map(),
@@ -209,7 +214,7 @@ export function client_component(source, analysis, options) {
 	for (const [node] of analysis.reactive_statements) {
 		const statement = [...state.legacy_reactive_statements].find(([n]) => n === node);
 		if (statement === undefined) {
-			error(node, 'INTERNAL', 'Could not find reactive statement');
+			throw new Error('Could not find reactive statement');
 		}
 		instance.body.push(statement[1]);
 	}
@@ -255,6 +260,7 @@ export function client_component(source, analysis, options) {
 	);
 
 	if (analysis.runes && options.dev) {
+		const exports = analysis.exports.map(({ name, alias }) => b.literal(alias ?? name));
 		/** @type {import('estree').Literal[]} */
 		const bindable = [];
 		for (const [name, binding] of properties) {
@@ -263,7 +269,15 @@ export function client_component(source, analysis, options) {
 			}
 		}
 		instance.body.unshift(
-			b.stmt(b.call('$.validate_prop_bindings', b.id('$$props'), b.array(bindable)))
+			b.stmt(
+				b.call(
+					'$.validate_prop_bindings',
+					b.id('$$props'),
+					b.array(bindable),
+					b.array(exports),
+					b.id(`${analysis.name}`)
+				)
+			)
 		);
 	}
 
@@ -382,7 +396,6 @@ export function client_component(source, analysis, options) {
 	);
 
 	if (analysis.uses_rest_props) {
-		/** @type {string[]} */
 		const named_props = analysis.exports.map(({ name, alias }) => alias ?? name);
 		for (const [name, binding] of analysis.instance.scope.declarations) {
 			if (binding.kind === 'bindable_prop') named_props.push(binding.prop_alias ?? name);
@@ -401,15 +414,12 @@ export function client_component(source, analysis, options) {
 	}
 
 	if (analysis.uses_props || analysis.uses_rest_props) {
+		const to_remove = [b.literal('children'), b.literal('$$slots'), b.literal('$$events')];
+		if (analysis.custom_element) {
+			to_remove.push(b.literal('$$host'));
+		}
 		component_block.body.unshift(
-			b.const(
-				'$$sanitized_props',
-				b.call(
-					'$.rest_props',
-					b.id('$$props'),
-					b.array([b.literal('children'), b.literal('$$slots'), b.literal('$$events')])
-				)
-			)
+			b.const('$$sanitized_props', b.call('$.rest_props', b.id('$$props'), b.array(to_remove)))
 		);
 	}
 
@@ -420,14 +430,37 @@ export function client_component(source, analysis, options) {
 	const body = [
 		...state.hoisted,
 		...module.body,
-		b.export_default(
-			b.function_declaration(
-				b.id(analysis.name),
-				[b.id('$$anchor'), b.id('$$props')],
-				component_block
-			)
+		b.function_declaration(
+			b.id(analysis.name),
+			[b.id('$$anchor'), b.id('$$props')],
+			component_block
 		)
 	];
+
+	if (options.hmr) {
+		body.push(
+			b.if(
+				b.id('import.meta.hot'),
+				b.block([
+					b.const(b.id('s'), b.call('$.source', b.id(analysis.name))),
+					b.stmt(b.assignment('=', b.id(analysis.name), b.call('$.hmr', b.id('s')))),
+					b.stmt(
+						b.call(
+							'import.meta.hot.accept',
+							b.arrow(
+								[b.id('module')],
+								b.block([
+									b.stmt(b.call('$.set', b.id('s'), b.member(b.id('module'), b.id('default'))))
+								])
+							)
+						)
+					)
+				])
+			)
+		);
+	}
+
+	body.push(b.export_default(b.id(analysis.name)));
 
 	if (options.dev) {
 		if (options.filename) {
@@ -446,8 +479,8 @@ export function client_component(source, analysis, options) {
 			);
 		}
 
-		body.unshift(b.stmt(b.call(b.id('$.mark_module_start'), b.id(analysis.name))));
-		body.push(b.stmt(b.call(b.id('$.mark_module_end'))));
+		body.unshift(b.stmt(b.call(b.id('$.mark_module_start'))));
+		body.push(b.stmt(b.call(b.id('$.mark_module_end'), b.id(analysis.name))));
 	}
 
 	if (options.discloseVersion) {

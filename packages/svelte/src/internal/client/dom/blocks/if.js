@@ -1,7 +1,8 @@
-import { IS_ELSEIF } from '../../constants.js';
+import { EFFECT_TRANSPARENT } from '../../constants.js';
 import { hydrate_nodes, hydrating, set_hydrating } from '../hydration.js';
 import { remove } from '../reconciler.js';
 import { block, branch, pause_effect, resume_effect } from '../../reactivity/effects.js';
+import { HYDRATION_END_ELSE } from '../../../../constants.js';
 
 /**
  * @param {Comment} anchor
@@ -19,36 +20,31 @@ export function if_block(
 	elseif = false
 ) {
 	/** @type {import('#client').Effect | null} */
-	let consequent_effect = null;
+	var consequent_effect = null;
 
 	/** @type {import('#client').Effect | null} */
-	let alternate_effect = null;
+	var alternate_effect = null;
 
 	/** @type {boolean | null} */
-	let condition = null;
+	var condition = null;
 
-	const effect = block(() => {
+	var flags = elseif ? EFFECT_TRANSPARENT : 0;
+
+	block(() => {
 		if (condition === (condition = !!get_condition())) return;
 
 		/** Whether or not there was a hydration mismatch. Needs to be a `let` or else it isn't treeshaken out */
 		let mismatch = false;
 
 		if (hydrating) {
-			const comment_text = /** @type {Comment} */ (hydrate_nodes?.[0])?.data;
+			const is_else = anchor.data === HYDRATION_END_ELSE;
 
-			if (
-				!comment_text ||
-				(comment_text === 'ssr:if:true' && !condition) ||
-				(comment_text === 'ssr:if:false' && condition)
-			) {
+			if (condition === is_else) {
 				// Hydration mismatch: remove everything inside the anchor and start fresh.
-				// This could happen using when `{#if browser} .. {/if}` in SvelteKit.
+				// This could happen with `{#if browser}...{/if}`, for example
 				remove(hydrate_nodes);
 				set_hydrating(false);
 				mismatch = true;
-			} else {
-				// Remove the ssr:if comment node or else it will confuse the subsequent hydration algorithm
-				hydrate_nodes.shift();
 			}
 		}
 
@@ -82,9 +78,5 @@ export function if_block(
 			// continue in hydration mode
 			set_hydrating(true);
 		}
-	});
-
-	if (elseif) {
-		effect.f |= IS_ELSEIF;
-	}
+	}, flags);
 }

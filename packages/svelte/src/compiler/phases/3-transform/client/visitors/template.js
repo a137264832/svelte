@@ -16,7 +16,6 @@ import {
 import { DOMProperties, PassiveEvents, VoidElements } from '../../../constants.js';
 import { is_custom_element_node, is_element_node } from '../../../nodes.js';
 import * as b from '../../../../utils/builders.js';
-import { error } from '../../../../errors.js';
 import {
 	with_loc,
 	function_visitor,
@@ -263,7 +262,7 @@ function serialize_element_spread_attributes(
 ) {
 	let needs_isolation = false;
 
-	/** @type {import('estree').Expression[]} */
+	/** @type {import('estree').ObjectExpression['properties']} */
 	const values = [];
 
 	for (const attribute of attributes) {
@@ -271,9 +270,21 @@ function serialize_element_spread_attributes(
 			const name = get_attribute_name(element, attribute, context);
 			// TODO: handle contains_call_expression
 			const [, value] = serialize_attribute_value(attribute.value, context);
-			values.push(b.object([b.init(name, value)]));
+
+			if (
+				is_event_attribute(attribute) &&
+				(attribute.value[0].expression.type === 'ArrowFunctionExpression' ||
+					attribute.value[0].expression.type === 'FunctionExpression')
+			) {
+				// Give the event handler a stable ID so it isn't removed and readded on every update
+				const id = context.state.scope.generate('event_handler');
+				context.state.init.push(b.var(id, value));
+				values.push(b.init(attribute.name, b.id(id)));
+			} else {
+				values.push(b.init(name, value));
+			}
 		} else {
-			values.push(/** @type {import('estree').Expression} */ (context.visit(attribute)));
+			values.push(b.spread(/** @type {import('estree').Expression} */ (context.visit(attribute))));
 		}
 
 		needs_isolation ||=
@@ -292,7 +303,7 @@ function serialize_element_spread_attributes(
 				'$.set_attributes',
 				element_id,
 				b.id(id),
-				b.array(values),
+				b.object(values),
 				lowercase_attributes,
 				b.literal(context.state.analysis.css.hash)
 			)
@@ -350,15 +361,27 @@ function serialize_dynamic_element_attributes(attributes, context, element_id) {
 	let needs_isolation = false;
 	let is_reactive = false;
 
-	/** @type {import('estree').Expression[]} */
+	/** @type {import('estree').ObjectExpression['properties']} */
 	const values = [];
 
 	for (const attribute of attributes) {
 		if (attribute.type === 'Attribute') {
 			const [, value] = serialize_attribute_value(attribute.value, context);
-			values.push(b.object([b.init(attribute.name, value)]));
+
+			if (
+				is_event_attribute(attribute) &&
+				(attribute.value[0].expression.type === 'ArrowFunctionExpression' ||
+					attribute.value[0].expression.type === 'FunctionExpression')
+			) {
+				// Give the event handler a stable ID so it isn't removed and readded on every update
+				const id = context.state.scope.generate('event_handler');
+				context.state.init.push(b.var(id, value));
+				values.push(b.init(attribute.name, b.id(id)));
+			} else {
+				values.push(b.init(attribute.name, value));
+			}
 		} else {
-			values.push(/** @type {import('estree').Expression} */ (context.visit(attribute)));
+			values.push(b.spread(/** @type {import('estree').Expression} */ (context.visit(attribute))));
 		}
 
 		is_reactive ||=
@@ -381,7 +404,7 @@ function serialize_dynamic_element_attributes(attributes, context, element_id) {
 					'$.set_dynamic_element_attributes',
 					element_id,
 					b.id(id),
-					b.array(values),
+					b.object(values),
 					b.literal(context.state.analysis.css.hash)
 				)
 			)
@@ -402,7 +425,7 @@ function serialize_dynamic_element_attributes(attributes, context, element_id) {
 				'$.set_dynamic_element_attributes',
 				element_id,
 				b.literal(null),
-				b.array(values),
+				b.object(values),
 				b.literal(context.state.analysis.css.hash)
 			)
 		)
@@ -917,6 +940,15 @@ function serialize_bind_this(bind_this, context, node) {
 
 	/** @type {import('estree').Expression[]} */
 	const args = [node, b.arrow([b.id('$$value'), ...ids], update), b.arrow([...ids], bind_this_id)];
+	// If we're mutating a property, then it might already be non-existent.
+	// If we make all the object nodes optional, then it avoids any runtime exceptions.
+	/** @type {import('estree').Expression | import('estree').Super} */
+	let bind_node = bind_this_id;
+
+	while (bind_node?.type === 'MemberExpression') {
+		bind_node.optional = true;
+		bind_node = bind_node.object;
+	}
 	if (each_ids.size) {
 		args.push(b.thunk(b.array(Array.from(each_ids.values()).map((id) => id[1]))));
 	}
@@ -1396,7 +1428,7 @@ function process_children(nodes, expression, is_element, { visit, state }) {
 
 			state.template.push(' ');
 
-			const [contains_call_expression, value] = serialize_template_literal(sequence, visit);
+			const [contains_call_expression, value] = serialize_template_literal(sequence, visit, state);
 
 			const update = b.stmt(b.call('$.set_text', text_id, value));
 
@@ -1511,25 +1543,39 @@ function serialize_attribute_value(attribute_value, context) {
 		}
 	}
 
-	return serialize_template_literal(attribute_value, context.visit);
+	return serialize_template_literal(attribute_value, context.visit, context.state);
 }
 
 /**
  * @param {Array<import('#compiler').Text | import('#compiler').ExpressionTag>} values
  * @param {(node: import('#compiler').SvelteNode) => any} visit
+ * @param {import("../types.js").ComponentClientTransformState} state
  * @returns {[boolean, import('estree').TemplateLiteral]}
  */
-function serialize_template_literal(values, visit) {
+function serialize_template_literal(values, visit, state) {
 	/** @type {import('estree').TemplateElement[]} */
 	const quasis = [];
 
 	/** @type {import('estree').Expression[]} */
 	const expressions = [];
 	let contains_call_expression = false;
+	let contains_multiple_call_expression = false;
 	quasis.push(b.quasi(''));
 
 	for (let i = 0; i < values.length; i++) {
 		const node = values[i];
+
+		if (node.type === 'ExpressionTag' && node.metadata.contains_call_expression) {
+			if (contains_call_expression) {
+				contains_multiple_call_expression = true;
+			}
+			contains_call_expression = true;
+		}
+	}
+
+	for (let i = 0; i < values.length; i++) {
+		const node = values[i];
+
 		if (node.type === 'Text') {
 			const last = /** @type {import('estree').TemplateElement} */ (quasis.at(-1));
 			last.value.raw += sanitize_template_string(node.data);
@@ -1539,11 +1585,23 @@ function serialize_template_literal(values, visit) {
 				last.value.raw += sanitize_template_string(node.expression.value + '');
 			}
 		} else {
-			if (node.type === 'ExpressionTag' && node.metadata.contains_call_expression) {
-				contains_call_expression = true;
-			}
+			if (contains_multiple_call_expression) {
+				const id = b.id(state.scope.generate('stringified_text'));
 
-			expressions.push(b.call('$.stringify', visit(node.expression)));
+				state.init.push(
+					b.const(
+						id,
+						b.call(
+							// In runes mode, we want things to be fine-grained - but not in legacy mode
+							state.analysis.runes ? '$.derived' : '$.derived_safe_equal',
+							b.thunk(/** @type {import('estree').Expression} */ (visit(node.expression)))
+						)
+					)
+				);
+				expressions.push(b.call('$.get', id));
+			} else {
+				expressions.push(b.call('$.stringify', visit(node.expression)));
+			}
 			quasis.push(b.quasi('', i + 1 === values.length));
 		}
 	}
@@ -1586,7 +1644,7 @@ export const template_visitors = {
 					declaration.id,
 					b.call(
 						// In runes mode, we want things to be fine-grained - but not in legacy mode
-						state.options.runes ? '$.derived' : '$.derived_safe_equal',
+						state.analysis.runes ? '$.derived' : '$.derived_safe_equal',
 						b.thunk(/** @type {import('estree').Expression} */ (visit(declaration.init)))
 					)
 				)
@@ -1623,7 +1681,7 @@ export const template_visitors = {
 
 			state.init.push(
 				// In runes mode, we want things to be fine-grained - but not in legacy mode
-				b.const(tmp, b.call(state.options.runes ? '$.derived' : '$.derived_safe_equal', fn))
+				b.const(tmp, b.call(state.analysis.runes ? '$.derived' : '$.derived_safe_equal', fn))
 			);
 
 			// we need to eagerly evaluate the expression in order to hit any
@@ -1717,10 +1775,10 @@ export const template_visitors = {
 		);
 	},
 	ClassDirective(node, { state, next }) {
-		error(node, 'INTERNAL', 'Node should have been handled elsewhere');
+		throw new Error('Node should have been handled elsewhere');
 	},
 	StyleDirective(node, { state, next }) {
-		error(node, 'INTERNAL', 'Node should have been handled elsewhere');
+		throw new Error('Node should have been handled elsewhere');
 	},
 	TransitionDirective(node, { state, visit }) {
 		let flags = node.modifiers.includes('global') ? TRANSITION_GLOBAL : 0;
@@ -1973,6 +2031,9 @@ export const template_visitors = {
 		/** @type {Array<import('#compiler').Attribute | import('#compiler').SpreadAttribute>} */
 		const attributes = [];
 
+		/** @type {import('#compiler').Attribute['value'] | undefined} */
+		let dynamic_namespace = undefined;
+
 		/** @type {import('#compiler').ClassDirective[]} */
 		const class_directives = [];
 
@@ -2001,6 +2062,9 @@ export const template_visitors = {
 
 		for (const attribute of node.attributes) {
 			if (attribute.type === 'Attribute') {
+				if (attribute.name === 'xmlns' && !is_text_attribute(attribute)) {
+					dynamic_namespace = attribute.value;
+				}
 				attributes.push(attribute);
 			} else if (attribute.type === 'SpreadAttribute') {
 				attributes.push(attribute);
@@ -2055,23 +2119,16 @@ export const template_visitors = {
 				}
 			})
 		);
-		context.state.init.push(
-			b.stmt(
-				b.call(
-					'$.element',
-					context.state.node,
-					get_tag,
-					node.metadata.svg === true
-						? b.true
-						: node.metadata.svg === false
-							? b.false
-							: b.literal(null),
-					inner.length === 0
-						? /** @type {any} */ (undefined)
-						: b.arrow([element_id, b.id('$$anchor')], b.block(inner))
-				)
-			)
-		);
+
+		const args = [context.state.node, get_tag, node.metadata.svg ? b.true : b.false];
+		if (inner.length > 0) {
+			args.push(b.arrow([element_id, b.id('$$anchor')], b.block(inner)));
+		}
+		if (dynamic_namespace) {
+			if (inner.length === 0) args.push(b.id('undefined'));
+			args.push(b.thunk(serialize_attribute_value(dynamic_namespace, context)[1]));
+		}
+		context.state.init.push(b.stmt(b.call('$.element', ...args)));
 	},
 	EachBlock(node, context) {
 		const each_node_meta = node.metadata;
@@ -2251,27 +2308,24 @@ export const template_visitors = {
 			for (const path of paths) {
 				const name = /** @type {import('estree').Identifier} */ (path.node).name;
 				const binding = /** @type {import('#compiler').Binding} */ (context.state.scope.get(name));
+				const needs_derived = path.has_default_value; // to ensure that default value is only called once
+				const fn = b.thunk(
+					/** @type {import('estree').Expression} */ (context.visit(path.expression?.(unwrapped)))
+				);
+
 				declarations.push(
-					b.let(
-						path.node,
-						b.thunk(
-							/** @type {import('estree').Expression} */ (
-								context.visit(path.expression?.(unwrapped))
-							)
-						)
-					)
+					b.let(path.node, needs_derived ? b.call('$.derived_safe_equal', fn) : fn)
+				);
+				binding.expression = needs_derived ? b.call('$.get', b.id(name)) : b.call(name);
+				binding.mutation = create_mutation(
+					/** @type {import('estree').Pattern} */ (path.update_expression(unwrapped))
 				);
 
 				// we need to eagerly evaluate the expression in order to hit any
 				// 'Cannot access x before initialization' errors
 				if (context.state.options.dev) {
-					declarations.push(b.stmt(b.call(name)));
+					declarations.push(b.stmt(binding.expression));
 				}
-
-				binding.expression = b.call(name);
-				binding.mutation = create_mutation(
-					/** @type {import('estree').Pattern} */ (path.update_expression(unwrapped))
-				);
 			}
 		}
 
@@ -2289,7 +2343,7 @@ export const template_visitors = {
 							)
 						: /** @type {import('estree').Expression} */ (context.visit(node.key))
 				)
-			: b.literal(null);
+			: b.id('$.index');
 
 		if (node.index && each_node_meta.contains_group_binding) {
 			// We needed to create a unique identifier for the index above, but we want to use the
@@ -2297,35 +2351,20 @@ export const template_visitors = {
 			declarations.push(b.let(node.index, index));
 		}
 
-		let callee = '$.each_indexed';
-
-		/** @type {import('estree').Expression[]} */
-		const args = [];
-
-		if ((each_type & EACH_KEYED) !== 0) {
-			if (context.state.options.dev && key_function.type !== 'Literal') {
-				context.state.init.push(
-					b.stmt(b.call('$.validate_each_keys', b.thunk(collection), key_function))
-				);
-			}
-
-			callee = '$.each_keyed';
-
-			args.push(
-				context.state.node,
-				b.literal(each_type),
-				each_node_meta.array_name ? each_node_meta.array_name : b.thunk(collection),
-				key_function,
-				b.arrow([b.id('$$anchor'), item, index], b.block(declarations.concat(children)))
-			);
-		} else {
-			args.push(
-				context.state.node,
-				b.literal(each_type),
-				each_node_meta.array_name ? each_node_meta.array_name : b.thunk(collection),
-				b.arrow([b.id('$$anchor'), item, index], b.block(declarations.concat(children)))
+		if (context.state.options.dev && (each_type & EACH_KEYED) !== 0) {
+			context.state.init.push(
+				b.stmt(b.call('$.validate_each_keys', b.thunk(collection), key_function))
 			);
 		}
+
+		/** @type {import('estree').Expression[]} */
+		const args = [
+			context.state.node,
+			b.literal(each_type),
+			each_node_meta.array_name ? each_node_meta.array_name : b.thunk(collection),
+			key_function,
+			b.arrow([b.id('$$anchor'), item, index], b.block(declarations.concat(children)))
+		];
 
 		if (node.fallback) {
 			args.push(
@@ -2336,7 +2375,7 @@ export const template_visitors = {
 			);
 		}
 
-		context.state.init.push(b.stmt(b.call(callee, ...args)));
+		context.state.init.push(b.stmt(b.call('$.each', ...args)));
 	},
 	IfBlock(node, context) {
 		context.state.template.push('<!>');
@@ -2475,24 +2514,23 @@ export const template_visitors = {
 			for (const path of paths) {
 				const name = /** @type {import('estree').Identifier} */ (path.node).name;
 				const binding = /** @type {import('#compiler').Binding} */ (context.state.scope.get(name));
-				declarations.push(
-					b.let(
-						path.node,
-						b.thunk(
-							/** @type {import('estree').Expression} */ (
-								context.visit(path.expression?.(b.maybe_call(b.id(arg_alias))))
-							)
-						)
+				const needs_derived = path.has_default_value; // to ensure that default value is only called once
+				const fn = b.thunk(
+					/** @type {import('estree').Expression} */ (
+						context.visit(path.expression?.(b.maybe_call(b.id(arg_alias))))
 					)
 				);
+
+				declarations.push(
+					b.let(path.node, needs_derived ? b.call('$.derived_safe_equal', fn) : fn)
+				);
+				binding.expression = needs_derived ? b.call('$.get', b.id(name)) : b.call(name);
 
 				// we need to eagerly evaluate the expression in order to hit any
 				// 'Cannot access x before initialization' errors
 				if (context.state.options.dev) {
-					declarations.push(b.stmt(b.call(name)));
+					declarations.push(b.stmt(binding.expression));
 				}
-
-				binding.expression = b.call(name);
 			}
 		}
 
@@ -2688,7 +2726,9 @@ export const template_visitors = {
 				case 'checked':
 					call_expr = b.call(`$.bind_checked`, state.node, getter, setter);
 					break;
-
+				case 'focused':
+					call_expr = b.call(`$.bind_focused`, state.node, setter);
+					break;
 				case 'group': {
 					/** @type {import('estree').CallExpression[]} */
 					const indexes = [];
@@ -2734,7 +2774,7 @@ export const template_visitors = {
 				}
 
 				default:
-					error(node, 'INTERNAL', 'unknown binding ' + node.name);
+					throw new Error('unknown binding ' + node.name);
 			}
 		}
 
@@ -2972,7 +3012,7 @@ export const template_visitors = {
 					b.assignment(
 						'=',
 						b.member(b.id('$.document'), b.id('title')),
-						serialize_template_literal(/** @type {any} */ (node.fragment.nodes), visit)[1]
+						serialize_template_literal(/** @type {any} */ (node.fragment.nodes), visit, state)[1]
 					)
 				)
 			);

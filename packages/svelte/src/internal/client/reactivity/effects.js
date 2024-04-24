@@ -7,9 +7,11 @@ import {
 	destroy_effect_children,
 	execute_effect,
 	get,
+	is_destroying_effect,
 	is_flushing_effect,
 	remove_reactions,
 	schedule_effect,
+	set_is_destroying_effect,
 	set_is_flushing_effect,
 	set_signal_status,
 	untrack
@@ -24,11 +26,33 @@ import {
 	EFFECT_RAN,
 	BLOCK_EFFECT,
 	ROOT_EFFECT,
-	IS_ELSEIF
+	EFFECT_TRANSPARENT
 } from '../constants.js';
 import { set } from './sources.js';
-import { noop } from '../../shared/utils.js';
 import { remove } from '../dom/reconciler.js';
+
+/**
+ * @param {import('#client').Effect | null} effect
+ * @param {'$effect' | '$effect.pre' | '$inspect'} rune
+ * @returns {asserts effect}
+ */
+export function validate_effect(effect, rune) {
+	if (effect === null) {
+		throw new Error(
+			'ERR_SVELTE_ORPHAN_EFFECT' +
+				(DEV
+					? `: ${rune} can only be used inside an effect (e.g. during component initialisation)`
+					: '')
+		);
+	}
+
+	if (is_destroying_effect) {
+		throw new Error(
+			'ERR_SVELTE_EFFECT_IN_TEARDOWN' +
+				(DEV ? `: ${rune} cannot be used inside an effect cleanup function.` : '')
+		);
+	}
+}
 
 /**
  * @param {import("#client").Effect} effect
@@ -53,6 +77,7 @@ export function push_effect(effect, parent_effect) {
  */
 function create_effect(type, fn, sync) {
 	var is_root = (type & ROOT_EFFECT) !== 0;
+
 	/** @type {import('#client').Effect} */
 	var effect = {
 		ctx: current_component_context,
@@ -103,12 +128,7 @@ export function effect_active() {
  * @param {() => void | (() => void)} fn
  */
 export function user_effect(fn) {
-	if (current_effect === null) {
-		throw new Error(
-			'ERR_SVELTE_ORPHAN_EFFECT' +
-				(DEV ? ': The Svelte $effect rune can only be used during component initialisation.' : '')
-		);
-	}
+	validate_effect(current_effect, '$effect');
 
 	// Non-nested `$effect(...)` in a component should be deferred
 	// until the component is mounted
@@ -132,15 +152,7 @@ export function user_effect(fn) {
  * @returns {import('#client').Effect}
  */
 export function user_pre_effect(fn) {
-	if (current_effect === null) {
-		throw new Error(
-			'ERR_SVELTE_ORPHAN_EFFECT' +
-				(DEV
-					? ': The Svelte $effect.pre rune can only be used during component initialisation.'
-					: '')
-		);
-	}
-
+	validate_effect(current_effect, '$effect.pre');
 	return render_effect(fn);
 }
 
@@ -150,9 +162,7 @@ export function user_pre_effect(fn) {
  * @returns {() => void}
  */
 export function effect_root(fn) {
-	// TODO is `untrack` correct here? Should `fn` re-run if its dependencies change?
-	// Should it even be modelled as an effect?
-	const effect = create_effect(ROOT_EFFECT, () => untrack(fn), true);
+	const effect = create_effect(ROOT_EFFECT, fn, true);
 	return () => {
 		destroy_effect(effect);
 	};
@@ -172,11 +182,11 @@ export function effect(fn) {
  * @param {() => void | (() => void)} fn
  */
 export function legacy_pre_effect(deps, fn) {
-	var context = /** @type {import('#client').ComponentContext} */ (current_component_context);
+	var context = /** @type {import('#client').ComponentContextLegacy} */ (current_component_context);
 
 	/** @type {{ effect: null | import('#client').Effect, ran: boolean }} */
 	var token = { effect: null, ran: false };
-	context.l1.push(token);
+	context.l.r1.push(token);
 
 	token.effect = render_effect(() => {
 		deps();
@@ -186,19 +196,19 @@ export function legacy_pre_effect(deps, fn) {
 		if (token.ran) return;
 
 		token.ran = true;
-		set(context.l2, true);
+		set(context.l.r2, true);
 		untrack(fn);
 	});
 }
 
 export function legacy_pre_effect_reset() {
-	var context = /** @type {import('#client').ComponentContext} */ (current_component_context);
+	var context = /** @type {import('#client').ComponentContextLegacy} */ (current_component_context);
 
 	render_effect(() => {
-		if (!get(context.l2)) return;
+		if (!get(context.l.r2)) return;
 
 		// Run dirty `$:` statements
-		for (var token of context.l1) {
+		for (var token of context.l.r1) {
 			var effect = token.effect;
 
 			if (check_dirtiness(effect)) {
@@ -208,7 +218,7 @@ export function legacy_pre_effect_reset() {
 			token.ran = false;
 		}
 
-		context.l2.v = false; // set directly to avoid rerunning this effect
+		context.l.r2.v = false; // set directly to avoid rerunning this effect
 	});
 }
 
@@ -220,9 +230,12 @@ export function render_effect(fn) {
 	return create_effect(RENDER_EFFECT, fn, true);
 }
 
-/** @param {(() => void)} fn */
-export function block(fn) {
-	return create_effect(RENDER_EFFECT | BLOCK_EFFECT, fn, true);
+/**
+ * @param {(() => void)} fn
+ * @param {number} flags
+ */
+export function block(fn, flags = 0) {
+	return create_effect(RENDER_EFFECT | BLOCK_EFFECT | flags, fn, true);
 }
 
 /** @param {(() => void)} fn */
@@ -231,10 +244,32 @@ export function branch(fn) {
 }
 
 /**
+ * @param {import("#client").Effect} effect
+ */
+export function execute_effect_teardown(effect) {
+	var teardown = effect.teardown;
+	if (teardown !== null) {
+		const previously_destroying_effect = is_destroying_effect;
+		set_is_destroying_effect(true);
+		try {
+			teardown.call(null);
+		} finally {
+			set_is_destroying_effect(previously_destroying_effect);
+		}
+	}
+}
+
+/**
  * @param {import('#client').Effect} effect
  * @returns {void}
  */
 export function destroy_effect(effect) {
+	var dom = effect.dom;
+
+	if (dom !== null) {
+		remove(dom);
+	}
+
 	destroy_effect_children(effect);
 	remove_reactions(effect, 0);
 	set_signal_status(effect, DESTROYED);
@@ -245,11 +280,7 @@ export function destroy_effect(effect) {
 		}
 	}
 
-	effect.teardown?.();
-
-	if (effect.dom !== null) {
-		remove(effect.dom);
-	}
+	execute_effect_teardown(effect);
 
 	var parent = effect.parent;
 
@@ -274,9 +305,8 @@ export function destroy_effect(effect) {
 		}
 	}
 
-	effect.first =
-		effect.last =
-		effect.next =
+	// `first` and `child` are nulled out in destroy_effect_children
+	effect.next =
 		effect.prev =
 		effect.teardown =
 		effect.ctx =
@@ -295,39 +325,17 @@ export function destroy_effect(effect) {
  * completed, and if the state change is reversed then we _resume_ it.
  * A paused effect does not update, and the DOM subtree becomes inert.
  * @param {import('#client').Effect} effect
- * @param {() => void} callback
+ * @param {() => void} [callback]
  */
-export function pause_effect(effect, callback = noop) {
+export function pause_effect(effect, callback) {
 	/** @type {import('#client').TransitionManager[]} */
 	var transitions = [];
 
 	pause_children(effect, transitions, true);
 
-	out(transitions, () => {
+	run_out_transitions(transitions, () => {
 		destroy_effect(effect);
-		callback();
-	});
-}
-
-/**
- * Pause multiple effects simultaneously, and coordinate their
- * subsequent destruction. Used in each blocks
- * @param {import('#client').Effect[]} effects
- * @param {() => void} callback
- */
-export function pause_effects(effects, callback = noop) {
-	/** @type {import('#client').TransitionManager[]} */
-	var transitions = [];
-
-	for (var effect of effects) {
-		pause_children(effect, transitions, true);
-	}
-
-	out(transitions, () => {
-		for (var effect of effects) {
-			destroy_effect(effect);
-		}
-		callback();
+		if (callback) callback();
 	});
 }
 
@@ -335,7 +343,7 @@ export function pause_effects(effects, callback = noop) {
  * @param {import('#client').TransitionManager[]} transitions
  * @param {() => void} fn
  */
-function out(transitions, fn) {
+export function run_out_transitions(transitions, fn) {
 	var remaining = transitions.length;
 	if (remaining > 0) {
 		var check = () => --remaining || fn();
@@ -352,7 +360,7 @@ function out(transitions, fn) {
  * @param {import('#client').TransitionManager[]} transitions
  * @param {boolean} local
  */
-function pause_children(effect, transitions, local) {
+export function pause_children(effect, transitions, local) {
 	if ((effect.f & INERT) !== 0) return;
 	effect.f ^= INERT;
 
@@ -368,8 +376,10 @@ function pause_children(effect, transitions, local) {
 
 	while (child !== null) {
 		var sibling = child.next;
-		var transparent = (child.f & IS_ELSEIF) !== 0 || (child.f & BRANCH_EFFECT) !== 0;
+		var transparent = (child.f & EFFECT_TRANSPARENT) !== 0 || (child.f & BRANCH_EFFECT) !== 0;
 		// TODO we don't need to call pause_children recursively with a linked list in place
+		// it's slightly more involved though as we have to account for `transparent` changing
+		// through the tree.
 		pause_children(child, transitions, transparent ? local : false);
 		child = sibling;
 	}
@@ -402,8 +412,10 @@ function resume_children(effect, local) {
 
 	while (child !== null) {
 		var sibling = child.next;
-		var transparent = (child.f & IS_ELSEIF) !== 0 || (child.f & BRANCH_EFFECT) !== 0;
+		var transparent = (child.f & EFFECT_TRANSPARENT) !== 0 || (child.f & BRANCH_EFFECT) !== 0;
 		// TODO we don't need to call resume_children recursively with a linked list in place
+		// it's slightly more involved though as we have to account for `transparent` changing
+		// through the tree.
 		resume_children(child, transparent ? local : false);
 		child = sibling;
 	}

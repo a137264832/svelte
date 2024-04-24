@@ -6,8 +6,8 @@ import {
 	empty,
 	init_operations
 } from './dom/operations.js';
-import { PassiveDelegatedEvents } from '../../constants.js';
-import { flush_sync, push, pop, current_component_context, untrack } from './runtime.js';
+import { HYDRATION_START, PassiveDelegatedEvents } from '../../constants.js';
+import { flush_sync, push, pop, current_component_context } from './runtime.js';
 import { effect_root, branch } from './reactivity/effects.js';
 import {
 	hydrate_anchor,
@@ -18,6 +18,8 @@ import {
 } from './dom/hydration.js';
 import { array_from } from './utils.js';
 import { handle_event_propagation } from './dom/elements/events.js';
+import { reset_head_anchor } from './dom/blocks/svelte-head.js';
+import * as w from './warnings.js';
 
 /** @type {Set<string>} */
 export const all_registered_events = new Set();
@@ -90,15 +92,16 @@ export function stringify(value) {
  * @param {import('../../index.js').ComponentType<import('../../index.js').SvelteComponent<Props, Events>>} component
  * @param {{
  * 		target: Document | Element | ShadowRoot;
- * 		props?: Props;
+ * 		anchor?: Node;
+ * 		props?: import('../types.js').RemoveBindable<Props>;
  * 		events?: { [Property in keyof Events]: (e: Events[Property]) => any };
- *  	context?: Map<any, any>;
+ * 		context?: Map<any, any>;
  * 		intro?: boolean;
  * 	}} options
  * @returns {Exports}
  */
 export function mount(component, options) {
-	const anchor = options.target.appendChild(empty());
+	const anchor = options.anchor ?? options.target.appendChild(empty());
 	// Don't flush previous effects to ensure order of outer effects stays consistent
 	return flush_sync(() => _mount(component, { ...options, anchor }), false);
 }
@@ -112,7 +115,7 @@ export function mount(component, options) {
  * @param {import('../../index.js').ComponentType<import('../../index.js').SvelteComponent<Props, Events>>} component
  * @param {{
  * 		target: Document | Element | ShadowRoot;
- * 		props?: Props;
+ * 		props?: import('../types.js').RemoveBindable<Props>;
  * 		events?: { [Property in keyof Events]: (e: Events[Property]) => any };
  *  	context?: Map<any, any>;
  * 		intro?: boolean;
@@ -121,8 +124,7 @@ export function mount(component, options) {
  * @returns {Exports}
  */
 export function hydrate(component, options) {
-	const container = options.target;
-	const first_child = /** @type {ChildNode} */ (container.firstChild);
+	const target = options.target;
 	const previous_hydrate_nodes = hydrate_nodes;
 
 	let hydrated = false;
@@ -132,7 +134,19 @@ export function hydrate(component, options) {
 		return flush_sync(() => {
 			set_hydrating(true);
 
-			const anchor = hydrate_anchor(first_child);
+			var node = target.firstChild;
+			while (
+				node &&
+				(node.nodeType !== 8 || /** @type {Comment} */ (node).data !== HYDRATION_START)
+			) {
+				node = node.nextSibling;
+			}
+
+			if (!node) {
+				throw new Error('Missing hydration marker');
+			}
+
+			const anchor = hydrate_anchor(node);
 			const instance = _mount(component, { ...options, anchor });
 
 			// flush_sync will run this callback and then synchronously run any pending effects,
@@ -153,7 +167,7 @@ export function hydrate(component, options) {
 				error
 			);
 
-			clear_text_content(container);
+			clear_text_content(target);
 
 			set_hydrating(false);
 			return mount(component, options);
@@ -163,28 +177,24 @@ export function hydrate(component, options) {
 	} finally {
 		set_hydrating(!!previous_hydrate_nodes);
 		set_hydrate_nodes(previous_hydrate_nodes);
+		reset_head_anchor();
 	}
 }
 
 /**
- * @template {Record<string, any>} Props
  * @template {Record<string, any>} Exports
- * @template {Record<string, any>} Events
- * @param {import('../../index.js').ComponentType<import('../../index.js').SvelteComponent<Props, Events>>} Component
+ * @param {import('../../index.js').ComponentType<import('../../index.js').SvelteComponent<any>>} Component
  * @param {{
  * 		target: Document | Element | ShadowRoot;
  * 		anchor: Node;
- * 		props?: Props;
- * 		events?: { [Property in keyof Events]: (e: Events[Property]) => any };
- *  	context?: Map<any, any>;
+ * 		props?: any;
+ * 		events?: any;
+ * 		context?: Map<any, any>;
  * 		intro?: boolean;
  * 	}} options
  * @returns {Exports}
  */
-function _mount(
-	Component,
-	{ target, anchor, props = /** @type {Props} */ ({}), events, context, intro = false }
-) {
+function _mount(Component, { target, anchor, props = {}, events, context, intro = false }) {
 	init_operations();
 
 	const registered_events = new Set();
@@ -234,27 +244,25 @@ function _mount(
 
 	const unmount = effect_root(() => {
 		branch(() => {
-			untrack(() => {
-				if (context) {
-					push({});
-					var ctx = /** @type {import('#client').ComponentContext} */ (current_component_context);
-					ctx.c = context;
-				}
+			if (context) {
+				push({});
+				var ctx = /** @type {import('#client').ComponentContext} */ (current_component_context);
+				ctx.c = context;
+			}
 
-				if (events) {
-					// We can't spread the object or else we'd lose the state proxy stuff, if it is one
-					/** @type {any} */ (props).$$events = events;
-				}
+			if (events) {
+				// We can't spread the object or else we'd lose the state proxy stuff, if it is one
+				/** @type {any} */ (props).$$events = events;
+			}
 
-				should_intro = intro;
-				// @ts-expect-error the public typings are not what the actual function looks like
-				component = Component(anchor, props) || {};
-				should_intro = true;
+			should_intro = intro;
+			// @ts-expect-error the public typings are not what the actual function looks like
+			component = Component(anchor, props) || {};
+			should_intro = true;
 
-				if (context) {
-					pop();
-				}
-			});
+			if (context) {
+				pop();
+			}
 		});
 
 		return () => {
@@ -262,6 +270,7 @@ function _mount(
 				target.removeEventListener(event_name, bound_event_listener);
 			}
 			root_event_handles.delete(event_handle);
+			mounted_components.delete(component);
 		};
 	});
 
@@ -282,8 +291,9 @@ let mounted_components = new WeakMap();
 export function unmount(component) {
 	const fn = mounted_components.get(component);
 	if (DEV && !fn) {
+		w.lifecycle_double_unmount();
 		// eslint-disable-next-line no-console
-		console.warn('Tried to unmount a component that was not mounted.');
+		console.trace('stack trace');
 	}
 	fn?.();
 }

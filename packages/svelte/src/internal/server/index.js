@@ -3,12 +3,14 @@ import { subscribe_to_store } from '../../store/utils.js';
 import {
 	UNINITIALIZED,
 	DOMBooleanAttributes,
+	RawTextElements,
 	disallowed_paragraph_contents,
 	interactive_elements,
 	is_tag_valid_with_parent
 } from '../../constants.js';
 import { DEV } from 'esm-env';
 import { current_component, pop, push } from './context.js';
+import { BLOCK_CLOSE, BLOCK_OPEN } from './hydration.js';
 
 /**
  * @typedef {{
@@ -160,12 +162,12 @@ export function element(payload, tag, attributes_fn, children_fn) {
 	payload.out += `>`;
 
 	if (!VoidElements.has(tag)) {
-		if (tag !== 'textarea') {
-			payload.out += '<!--[-->';
+		if (!RawTextElements.includes(tag)) {
+			payload.out += BLOCK_OPEN;
 		}
 		children_fn();
-		if (tag !== 'textarea') {
-			payload.out += '<!--]-->';
+		if (!RawTextElements.includes(tag)) {
+			payload.out += BLOCK_CLOSE;
 		}
 		payload.out += `</${tag}>`;
 	}
@@ -178,7 +180,7 @@ export function element(payload, tag, attributes_fn, children_fn) {
 export let on_destroy = [];
 
 /**
- * @param {(...args: any[]) => void} component
+ * @param {typeof import('svelte').SvelteComponent} component
  * @param {{ props: Record<string, any>; context?: Map<any, any> }} options
  * @returns {RenderOutput}
  */
@@ -187,28 +189,26 @@ export function render(component, options) {
 
 	const prev_on_destroy = on_destroy;
 	on_destroy = [];
-	payload.out += '<!--[-->';
+	payload.out += BLOCK_OPEN;
 
 	if (options.context) {
 		push();
 		/** @type {import('#server').Component} */ (current_component).c = options.context;
 	}
 
+	// @ts-expect-error
 	component(payload, options.props, {}, {});
 
 	if (options.context) {
 		pop();
 	}
 
-	payload.out += '<!--]-->';
+	payload.out += BLOCK_CLOSE;
 	for (const cleanup of on_destroy) cleanup();
 	on_destroy = prev_on_destroy;
 
 	return {
-		head:
-			payload.head.out || payload.head.title
-				? payload.head.title + '<!--[-->' + payload.head.out + '<!--]-->'
-				: '',
+		head: payload.head.out || payload.head.title ? payload.head.out + payload.head.title : '',
 		html: payload.out
 	};
 }
@@ -245,7 +245,9 @@ export function escape(value, is_attr = false) {
  */
 export function head(payload, fn) {
 	const head_payload = payload.head;
+	payload.head.out += BLOCK_OPEN;
 	fn(head_payload);
+	payload.head.out += BLOCK_CLOSE;
 }
 
 /**
@@ -512,11 +514,21 @@ export function unsubscribe_stores(store_values) {
 /**
  * @template V
  * @param {V} value
- * @param {V} fallback
+ * @param {() => V} fallback lazy because could contain side effects
  * @returns {V}
  */
 export function value_or_fallback(value, fallback) {
-	return value === undefined ? fallback : value;
+	return value === undefined ? fallback() : value;
+}
+
+/**
+ * @template V
+ * @param {V} value
+ * @param {() => Promise<V>} fallback lazy because could contain side effects
+ * @returns {Promise<V>}
+ */
+export async function value_or_fallback_async(value, fallback) {
+	return value === undefined ? fallback() : value;
 }
 
 /**
