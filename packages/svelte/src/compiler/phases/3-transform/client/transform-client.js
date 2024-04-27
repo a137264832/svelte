@@ -232,18 +232,6 @@ export function client_component(source, analysis, options) {
 		group_binding_declarations.push(b.const(group.name, b.array([])));
 	}
 
-	// Bind static exports to props so that people can access them with bind:x
-	const static_bindings = analysis.exports.map(({ name, alias }) => {
-		return b.stmt(
-			b.call(
-				'$.bind_prop',
-				b.id('$$props'),
-				b.literal(alias ?? name),
-				serialize_get_binding(b.id(name), instance_state)
-			)
-		);
-	});
-
 	const component_returned_object = analysis.exports.map(({ name, alias }) => {
 		const expression = serialize_get_binding(b.id(name), instance_state);
 
@@ -363,15 +351,29 @@ export function client_component(source, analysis, options) {
 	if (options.dev) push_args.push(b.id(analysis.name));
 
 	const component_block = b.block([
-		b.stmt(b.call('$.push', ...push_args)),
 		...store_setup,
 		...legacy_reactive_declarations,
 		...group_binding_declarations,
 		.../** @type {import('estree').Statement[]} */ (instance.body),
-		analysis.runes ? b.empty : b.stmt(b.call('$.init')),
-		.../** @type {import('estree').Statement[]} */ (template.body),
-		...static_bindings
+		analysis.runes || !analysis.needs_context ? b.empty : b.stmt(b.call('$.init')),
+		.../** @type {import('estree').Statement[]} */ (template.body)
 	]);
+
+	if (!analysis.runes) {
+		// Bind static exports to props so that people can access them with bind:x
+		for (const { name, alias } of analysis.exports) {
+			component_block.body.push(
+				b.stmt(
+					b.call(
+						'$.bind_prop',
+						b.id('$$props'),
+						b.literal(alias ?? name),
+						serialize_get_binding(b.id(name), instance_state)
+					)
+				)
+			);
+		}
+	}
 
 	const append_styles =
 		analysis.inject_styles && analysis.css.ast
@@ -389,11 +391,22 @@ export function client_component(source, analysis, options) {
 			: () => {};
 
 	append_styles();
-	component_block.body.push(
-		component_returned_object.length > 0
-			? b.return(b.call('$.pop', b.object(component_returned_object)))
-			: b.stmt(b.call('$.pop'))
-	);
+
+	const should_inject_context =
+		analysis.needs_context ||
+		analysis.reactive_statements.size > 0 ||
+		component_returned_object.length > 0 ||
+		options.dev;
+
+	if (should_inject_context) {
+		component_block.body.unshift(b.stmt(b.call('$.push', ...push_args)));
+
+		component_block.body.push(
+			component_returned_object.length > 0
+				? b.return(b.call('$.pop', b.object(component_returned_object)))
+				: b.stmt(b.call('$.pop'))
+		);
+	}
 
 	if (analysis.uses_rest_props) {
 		const named_props = analysis.exports.map(({ name, alias }) => alias ?? name);
@@ -427,18 +440,25 @@ export function client_component(source, analysis, options) {
 		component_block.body.unshift(b.const('$$slots', b.call('$.sanitize_slots', b.id('$$props'))));
 	}
 
-	const body = [
-		...state.hoisted,
-		...module.body,
-		b.function_declaration(
-			b.id(analysis.name),
-			[b.id('$$anchor'), b.id('$$props')],
-			component_block
-		)
-	];
+	let should_inject_props =
+		should_inject_context ||
+		analysis.needs_props ||
+		analysis.uses_props ||
+		analysis.uses_rest_props ||
+		analysis.uses_slots ||
+		analysis.slot_names.size > 0;
+
+	const body = [...state.hoisted, ...module.body];
+
+	const component = b.function_declaration(
+		b.id(analysis.name),
+		should_inject_props ? [b.id('$$anchor'), b.id('$$props')] : [b.id('$$anchor')],
+		component_block
+	);
 
 	if (options.hmr) {
 		body.push(
+			component,
 			b.if(
 				b.id('import.meta.hot'),
 				b.block([
@@ -456,11 +476,13 @@ export function client_component(source, analysis, options) {
 						)
 					)
 				])
-			)
-		);
-	}
+			),
 
-	body.push(b.export_default(b.id(analysis.name)));
+			b.export_default(b.id(analysis.name))
+		);
+	} else {
+		body.push(b.export_default(component));
+	}
 
 	if (options.dev) {
 		if (options.filename) {

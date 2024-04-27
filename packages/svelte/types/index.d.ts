@@ -345,7 +345,7 @@ declare module 'svelte' {
 		events?: { [Property in keyof Events]: (e: Events[Property]) => any; } | undefined;
 		context?: Map<any, any> | undefined;
 		intro?: boolean | undefined;
-		recover?: false | undefined;
+		recover?: boolean | undefined;
 	}): Exports;
 	/**
 	 * Unmounts a component that was previously mounted using `mount` or `hydrate`.
@@ -623,6 +623,7 @@ declare module 'svelte/compiler' {
 		 * If `true`, getters and setters will be created for the component's props. If `false`, they will only be created for readonly exported values (i.e. those declared with `const`, `class` and `function`). If compiling with `customElement: true` this option defaults to `true`.
 		 *
 		 * @default false
+		 * @deprecated This will have no effect in runes mode
 		 */
 		accessors?: boolean;
 		/**
@@ -636,6 +637,7 @@ declare module 'svelte/compiler' {
 		 * This allows it to be less conservative about checking whether values have changed.
 		 *
 		 * @default false
+		 * @deprecated This will have no effect in runes mode
 		 */
 		immutable?: boolean;
 		/**
@@ -1084,6 +1086,14 @@ declare module 'svelte/compiler' {
 	 * https://svelte.dev/docs/svelte-compiler#svelte-version
 	 * */
 	export const VERSION: string;
+	/**
+	 * Does a best-effort migration of Svelte code towards using runes, event attributes and render tags.
+	 * May throw an error if the code is too complex to migrate automatically.
+	 *
+	 * */
+	export function migrate(source: string): {
+		code: string;
+	};
 	class Scope {
 		
 		constructor(root: ScopeRoot, parent: Scope | null, porous: boolean);
@@ -1957,6 +1967,12 @@ declare module 'svelte/legacy' {
 	 *
 	 * */
 	export function asClassComponent<Props extends Record<string, any>, Exports extends Record<string, any>, Events extends Record<string, any>, Slots extends Record<string, any>>(component: import("svelte").SvelteComponent<Props, Events, Slots>): import("svelte").ComponentType<import("svelte").SvelteComponent<Props, Events, Slots> & Exports>;
+	/**
+	 * Runs the given function once immediately on the server, and works like `$effect.pre` on the client.
+	 *
+	 * @deprecated Use this only as a temporary solution to migrate your component code to Svelte 5.
+	 * */
+	export function run(fn: () => void | (() => void)): void;
 }
 
 declare module 'svelte/motion' {
@@ -2419,6 +2435,7 @@ declare module 'svelte/types/compiler/interfaces' {
 		 * If `true`, getters and setters will be created for the component's props. If `false`, they will only be created for readonly exported values (i.e. those declared with `const`, `class` and `function`). If compiling with `customElement: true` this option defaults to `true`.
 		 *
 		 * @default false
+		 * @deprecated This will have no effect in runes mode
 		 */
 		accessors?: boolean;
 		/**
@@ -2432,6 +2449,7 @@ declare module 'svelte/types/compiler/interfaces' {
 		 * This allows it to be less conservative about checking whether values have changed.
 		 *
 		 * @default false
+		 * @deprecated This will have no effect in runes mode
 		 */
 		immutable?: boolean;
 		/**
